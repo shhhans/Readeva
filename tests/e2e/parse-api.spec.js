@@ -153,6 +153,25 @@ test('解析请求发送的是单页 PDF 字节流（不依赖共享文件路径
   expect(converts[0].sha256).toBe(crypto.createHash('sha256').update(expected).digest('hex'));
 });
 
+test('结果响应与落盘记录都不含解析服务地址（服务边界，审查 B1）', async ({ request }) => {
+  const res = await request.get(`${service.base}/api/documents/${docId}/pages/3/parse/result`);
+  expect(res.status()).toBe(200);
+  const body = await res.json();
+  const serialized = JSON.stringify(body);
+  expect(serialized).not.toContain('serviceUrl');
+  expect(serialized).not.toContain(mock.base);
+
+  // 落盘文件同样不得含解析服务地址。
+  const recordPath = path.join(service.dataDir, 'parses', docId, 'page-3.json');
+  const disk = fs.readFileSync(recordPath, 'utf8');
+  expect(disk).not.toContain('serviceUrl');
+  expect(disk).not.toContain(mock.base);
+
+  // 状态端点同样不应携带任何元信息地址。
+  const status = await request.get(`${service.base}/api/documents/${docId}/pages/3/parse`);
+  expect(JSON.stringify(await status.json())).not.toContain('serviceUrl');
+});
+
 test('解析结果已持久保存：重启服务后直接取回，不重新解析', async ({ request, browser }) => {
   const before = await (
     await request.get(`${service.base}/api/documents/${docId}/pages/3/parse/result`)

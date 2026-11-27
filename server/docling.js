@@ -77,8 +77,8 @@ function normalizeBbox(prov, fallbackPageNo) {
     r: bbox.r,
     b: bbox.b,
     coordOrigin: bbox.coord_origin ?? null,
-    // 解析按单页进行；结果按用户阅读页归档。
-    pageNo: Number.isFinite(first.page_no) && first.page_no > 0 ? fallbackPageNo : fallbackPageNo,
+    // 解析按单页进行，结果统一按用户阅读页归档，页码以请求页为准。
+    pageNo: fallbackPageNo,
   };
 }
 

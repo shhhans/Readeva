@@ -225,6 +225,8 @@ app.get('/api/documents/:id/pages/:page/parse/result', (req, res) => {
   if (!record || record.status !== 'succeeded') {
     return res.status(404).json({ error: 'parse result not found' });
   }
+  // 防御：无论落盘记录来自哪个版本，绝不通过接口暴露解析服务地址（审查 B1）。
+  const { serviceUrl, ...meta } = record.meta ?? {};
   res.json({
     parse: {
       documentId: record.documentId,
@@ -232,7 +234,7 @@ app.get('/api/documents/:id/pages/:page/parse/result', (req, res) => {
       status: record.status,
       parseId: record.parseId,
       blocks: record.blocks,
-      meta: record.meta,
+      meta,
       updatedAt: record.updatedAt,
     },
   });

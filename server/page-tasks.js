@@ -76,7 +76,8 @@ export class ParseTaskManager {
       blocks: result.blocks,
       meta: {
         engine: 'docling',
-        serviceUrl: this.adapter.baseUrl,
+        // 注意：解析服务地址不入盘、不经接口返回（服务边界，审查 B1）——
+        // 地址属运行时配置，不属于解析成果内容。
         requestedAt,
         completedAt: new Date().toISOString(),
         errors: result.errors,

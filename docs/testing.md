@@ -30,7 +30,7 @@
 
 ## 真实 Docling 接入验证
 
-非自动化层，验收时以真实服务执行（脚本 `node .tmp/verify-real.mjs`，见仓库 PR 描述中的结果记录）：
+非自动化层，验收时以真实服务执行（脚本已入库：仓库根目录运行 `node scripts/verify-real-docling.mjs`，结果记录见 PR 描述）：
 
 1. 启动解析服务：`conda run -n readeva python -m uvicorn docling_service.main:app --host 127.0.0.1 --port 5001`（conda 环境 `readeva`，docling 2.153.0）。
 2. 启动 Readeva 服务：`npm start -- --docling-url http://127.0.0.1:5001`。
