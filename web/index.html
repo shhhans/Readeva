@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Readeva</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 书库视图 -->
+    <section id="view-library" class="view">
+      <header class="topbar">
+        <h1>Readeva 书库</h1>
+        <span class="spacer"></span>
+        <label class="button primary" for="import-input">导入 PDF</label>
+        <input id="import-input" type="file" accept="application/pdf,.pdf" multiple hidden />
+        <button id="settings-button" type="button">服务设置</button>
+      </header>
+      <main class="library-main">
+        <p id="import-status" class="status" hidden></p>
+        <div id="library-empty" class="empty" hidden>
+          书库为空：点击「导入 PDF」添加有文字层的 PDF 文档。
+        </div>
+        <table id="library-table" hidden>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>页数</th>
+              <th>大小</th>
+              <th>内容身份 (SHA-256)</th>
+              <th>上次阅读</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="library-tbody"></tbody>
+        </table>
+      </main>
+      <dialog id="settings-dialog">
+        <form method="dialog">
+          <h2>服务设置</h2>
+          <label>
+            服务地址
+            <input id="service-url-input" type="text" placeholder="留空使用当前页面同源地址" />
+          </label>
+          <p class="hint">解析服务是独立进程，可部署在本机或远端；关闭浏览器不会终止服务。</p>
+          <div class="dialog-actions">
+            <button value="cancel" type="submit">取消</button>
+            <button value="save" id="settings-save" type="submit">保存</button>
+          </div>
+        </form>
+      </dialog>
+    </section>
+
+    <!-- 阅读视图 -->
+    <section id="view-reader" class="view" hidden>
+      <header class="topbar reader-bar">
+        <button id="back-button" type="button">← 书库</button>
+        <span id="reader-title" class="title"></span>
+        <span id="reader-identity" class="muted mono"></span>
+        <span class="spacer"></span>
+        <div class="reader-controls">
+          <button id="page-prev" type="button" title="上一页">上一页</button>
+          <span class="page-box">
+            <input id="page-input" type="number" min="1" value="1" aria-label="页码" />
+            <span class="muted">/ <span id="page-total">–</span></span>
+          </span>
+          <button id="page-next" type="button" title="下一页">下一页</button>
+          <span class="controls-divider"></span>
+          <button id="zoom-out" type="button" title="缩小">−</button>
+          <span id="zoom-level" class="mono">100%</span>
+          <button id="zoom-in" type="button" title="放大">＋</button>
+          <button id="zoom-fit" type="button" title="适配宽度">适配宽度</button>
+        </div>
+      </header>
+      <p id="reader-error" class="status" hidden></p>
+      <div id="viewer">
+        <canvas id="pdf-canvas"></canvas>
+      </div>
+    </section>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

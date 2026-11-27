@@ -1,0 +1,177 @@
+:root {
+  --bg: #f5f6fa;
+  --surface: #ffffff;
+  --border: #e2e4ec;
+  --text: #22283a;
+  --muted: #6b7186;
+  --accent: #4353ff;
+  --accent-weak: #eceeff;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+#app, .view { height: 100%; }
+
+.view { display: flex; flex-direction: column; }
+.view[hidden] { display: none; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.topbar h1 { font-size: 17px; margin: 0; font-weight: 600; }
+.spacer { flex: 1; }
+.title { font-weight: 600; }
+
+button, .button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 6px 12px;
+  user-select: none;
+}
+
+button:hover, .button:hover { border-color: var(--accent); color: var(--accent); }
+
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.button.primary:hover { color: #fff; opacity: 0.92; }
+
+.muted { color: var(--muted); }
+.mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+
+.library-main { padding: 16px 20px; overflow: auto; flex: 1; }
+
+.status {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--accent-weak);
+  color: #3038a8;
+}
+
+.empty { padding: 48px 0; text-align: center; color: var(--muted); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+th, td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+thead th {
+  background: #fafbfe;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+tbody tr:last-child td { border-bottom: none; }
+
+.open-link {
+  color: var(--accent);
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+}
+.open-link:hover { text-decoration: underline; }
+
+.reader-bar { flex-wrap: wrap; row-gap: 8px; }
+
+.reader-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.controls-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.page-box { display: inline-flex; align-items: center; gap: 6px; }
+
+.page-box input {
+  width: 64px;
+  text-align: center;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+#zoom-level { min-width: 44px; text-align: center; }
+
+#reader-error { margin: 12px 20px; }
+
+#viewer {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  padding: 20px;
+}
+
+#pdf-canvas {
+  background: #fff;
+  box-shadow: 0 2px 14px rgba(15, 20, 40, 0.18);
+  flex: none;
+}
+
+dialog {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  min-width: 380px;
+}
+
+dialog::backdrop { background: rgba(20, 24, 40, 0.35); }
+
+dialog h2 { font-size: 16px; margin: 0 0 14px; }
+
+dialog label { display: block; margin-bottom: 10px; }
+
+dialog input {
+  width: 100%;
+  padding: 8px;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.hint { color: var(--muted); font-size: 12px; }
+
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }

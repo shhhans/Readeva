@@ -1,0 +1,23 @@
+{
+  "name": "readeva",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Readeva —— PDF 阅读工作台（Issue #2：导入书库并阅读 PDF 原页）",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "fixtures": "node scripts/make-fixtures.mjs",
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0"
+  }
+}
