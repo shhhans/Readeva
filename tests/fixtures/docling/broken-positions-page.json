@@ -1,0 +1,54 @@
+{
+  "schema_name": "DoclingDocument",
+  "version": "1.2.0",
+  "name": "readeva-fixture-broken-positions-page",
+  "body": {
+    "self_ref": "#/body",
+    "children": [
+      { "$ref": "#/texts/0" },
+      { "$ref": "#/texts/1" },
+      { "$ref": "#/texts/2" }
+    ],
+    "content_layer": "body",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "groups": [],
+  "texts": [
+    {
+      "self_ref": "#/texts/0",
+      "label": "title",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 40.0, "r": 320.0, "b": 70.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 20]
+        }
+      ],
+      "text": "Broken positions page (fixture)"
+    },
+    {
+      "self_ref": "#/texts/1",
+      "label": "paragraph",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 100.0, "t": 120.0, "r": 100.0, "b": 160.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 30]
+        }
+      ],
+      "text": "This paragraph carries a degenerate (zero-width) bbox that cannot be located on the page."
+    },
+    {
+      "self_ref": "#/texts/2",
+      "label": "paragraph",
+      "prov": [],
+      "text": "This paragraph carries no provenance at all."
+    }
+  ],
+  "pictures": [],
+  "tables": [],
+  "pages": {
+    "1": { "page_no": 1, "size": { "width": 595.28, "height": 841.89 } }
+  }
+}

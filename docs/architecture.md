@@ -41,6 +41,7 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 
 - 每块携带 `id`（块内唯一）与阅读顺序 `order`；页眉页脚（furniture 层与 page_header/page_footer/page_number）不进入阅读顺序。
 - 位置取自 `prov[0].bbox`（记录 l/t/r/b/coordOrigin，页码归一为用户阅读页）；**缺少位置不阻断展示**，仅 `bbox: null`。
+- 坐标为 PDF 点距（页面尺寸坐标系，`coordOrigin` 记录原点方向：Docling 默认 `BOTTOMLEFT`，PDF 原生；也兼容 `TOPLEFT`）；客户端换算时按原点显式翻转（见「双向联动」）。
 - 图片资源仅接受 data URI 或 http(s) URI；服务端本地路径等不可达资源以占位展示，内容块仍然保留。
 - 解析身份 `parseId = sha256(blocks)`：同一内容重新解析身份不变（为后续译文绑定提供稳定关联）。
 
@@ -64,8 +65,18 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 
 解析任务在服务端后台执行（`server/page-tasks.js`）：抽取单页字节流（pdf-lib，固定元数据保证字节确定）→ 提交解析服务 → 轮询状态 → 取结果 → 规范化 → 自动持久保存（成功与失败都落盘）。服务重启丢失的进行中任务回落为「未开始」，已完成页永远从磁盘取回。
 
+## 双向联动（Issue #4）
+
+原页与内容块的对照阅读在纯前端实现（`web/page-linkage.js`），服务端无新增接口：
+
+- **覆盖层**：`#page-stage`（position relative）包住 canvas，`#page-overlay` 覆盖层内按内容块 bbox 叠加定位框 `.page-block-box`。bbox（PDF 点坐标）→ 渲染坐标的换算系数取「canvas CSS 尺寸 / 页面点尺寸」，与 devicePixelRatio 无关，天然跟随缩放（含「适配宽度」）；`coordOrigin=BOTTOMLEFT` 时按页面点高度翻转后映射到顶部原点。
+- **滚动布局契约**：`#viewer` 用 `justify-content: flex-start` + `align-items: flex-start`、`#page-stage` 用 `margin: 0 auto`——画布宽/高于可视区时只向右/向下溢出，起始侧始终可达（居中溢出会使起始侧落在可滚动区之外，scrollLeft/scrollTop 无法为负，主动定位会静默失效）；不拉伸 stage 保证覆盖层贴合 canvas 实际尺寸。
+- **主动定位滚动**：直接设 `viewer.scrollTop/scrollLeft`（`#viewer`）与 `content.scrollTop`（右侧面板）居中目标元素，不用 `scrollIntoView`（可能连带滚动外层文档）。
+- **组件间零耦合**：数据全部经 DOM 与事件流转——渲染完成后 `PdfViewer` 在 `#viewer` 上派发 `pdf-rendered`（携带 page/zoom/页面点尺寸）；`ParsePanel` 渲染内容后派发 `parse-blocks-changed`，内容块带 `data-bbox`（原始 bbox JSON）。联动层监听两类事件重建覆盖框，翻页/缩放后位置自动重算，选中态跨缩放保留、跨翻页重置。
+- **双向交互**：悬浮右侧内容块 ↔ 悬浮原页覆盖框互相高亮（`.hot`）；点击右侧块 → 原页滚动定位到对应区域，点击覆盖框 → 右侧滚动定位到对应块（`.active` 选中态独占）。
+- **失败语义**：位置不可用（`bbox: null` 或无效坐标，如零尺寸/出页）的内容块照常展示、无覆盖框；悬浮静默（无框可亮即无操作）；主动定位失败给 `#locate-toast` 短提示（约 3s 自动消失），均不报错、不打断阅读。
+
 ## 后续扩展边界（本任务不实现）
 
 - **页解析调度（Issue #5）**：当前页及后续页优先、跳页重排优先级、闲置补全剩余页、失败隔离与显式重试、客户端退出宽限期与重连重新调度；任务状态机与持久化基础已在本任务就位。
-- **双向联动（Issue #4）**：内容块已带 `id` 与可用 `bbox`（页内坐标系），PDF.js 渲染与 `#viewer` 容器独立成组件（`web/pdf-viewer.js`），右侧面板块带 `data-block-id` / `data-has-position`，可直接叠加 bbox 覆盖层与双向高亮。
 - **查词翻译、成果包导入导出**：译文将绑定「文档 + 页解析身份（parseId）」；成果包可从 `parses/` + `progress/` + 文档身份组成一致快照。

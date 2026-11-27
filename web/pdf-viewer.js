@@ -17,6 +17,8 @@ export function loadPdfjs() {
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 5;
 
+export const RENDER_EVENT = 'pdf-rendered';
+
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
 /**
@@ -106,6 +108,8 @@ export class PdfViewer {
     const page = await this.pdf.getPage(this.page);
     if (token !== this.renderToken) return;
 
+    // 缩放联动需要页面点距（bbox 的 PDF 坐标基准）；scale=1 视口即页面点尺寸。
+    const baseViewport = page.getViewport({ scale: 1 });
     const viewport = page.getViewport({ scale: this.zoom });
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     const ctx = this.canvas.getContext('2d');
@@ -133,6 +137,17 @@ export class PdfViewer {
       // 渲染完成标记，供界面与测试确认当前页/缩放已生效。
       this.container.dataset.page = String(this.page);
       this.container.dataset.zoom = String(this.zoom);
+      // 渲染几何事件：覆盖层据此按当前缩放重算 bbox 位置（Issue #4）。
+      this.container.dispatchEvent(
+        new CustomEvent(RENDER_EVENT, {
+          detail: {
+            page: this.page,
+            zoom: this.zoom,
+            pointWidth: baseViewport.width,
+            pointHeight: baseViewport.height,
+          },
+        }),
+      );
     }
   }
 

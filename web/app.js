@@ -10,6 +10,7 @@ import {
 } from './api.js';
 import { PdfViewer } from './pdf-viewer.js';
 import { ParsePanel } from './parse-panel.js';
+import { PageLinkage } from './page-linkage.js';
 
 const state = {
   view: 'library',
@@ -307,5 +308,16 @@ document.addEventListener('keydown', (event) => {
 
 // 右侧解析面板：展示当前页解析状态与结构化内容。
 state.parsePanel = new ParsePanel({ root: $('#parse-panel') });
+
+// 原页与内容块双向联动（Issue #4）：覆盖层、双向高亮与主动定位。
+const linkage = new PageLinkage({
+  viewer: $('#viewer'),
+  canvas: $('#pdf-canvas'),
+  overlay: $('#page-overlay'),
+  panel: $('#parse-panel'),
+  content: $('#parse-content'),
+  toast: $('#locate-toast'),
+});
+linkage.attach();
 
 route();

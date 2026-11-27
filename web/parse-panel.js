@@ -8,6 +8,9 @@ import {
 const POLL_INTERVAL_MS = 500;
 const POLL_MAX_MS = 10 * 60 * 1000;
 
+/** 内容块列表变化事件：联动层据此重建原页覆盖框（Issue #4）。 */
+export const BLOCKS_CHANGED_EVENT = 'parse-blocks-changed';
+
 /**
  * 阅读视图右侧面板：展示当前页解析状态与结构化内容。
  *
@@ -54,6 +57,11 @@ export class ParsePanel {
 
   clearContent() {
     this.contentEl.replaceChildren();
+    this.notifyBlocksChanged();
+  }
+
+  notifyBlocksChanged() {
+    this.root.dispatchEvent(new CustomEvent(BLOCKS_CHANGED_EVENT, { bubbles: true }));
   }
 
   /* ---------------- 生命周期 ---------------- */
@@ -233,6 +241,7 @@ export class ParsePanel {
       fragment.append(empty);
     }
     this.contentEl.append(fragment);
+    this.notifyBlocksChanged();
   }
 
   renderBlock(block) {
@@ -241,6 +250,8 @@ export class ParsePanel {
     wrapper.dataset.blockId = block.id ?? '';
     wrapper.dataset.kind = block.kind;
     wrapper.dataset.hasPosition = block.bbox ? 'true' : 'false';
+    // 原始 bbox（PDF 坐标）随 DOM 提供，联动层按当前渲染缩放换算覆盖位置。
+    if (block.bbox) wrapper.dataset.bbox = JSON.stringify(block.bbox);
 
     let inner;
     switch (block.kind) {

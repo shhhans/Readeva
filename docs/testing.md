@@ -28,6 +28,19 @@
 | `tests/e2e/parse-panel.spec.js`（浏览器级，mock Docling） | 原页先渲染（`data-page` 先就绪）解析不等阅读；面板状态可见（未开始/解析中…/已完成）；右侧按阅读顺序渲染标题/段落/列表（ul+ol）/表格（th+td）/图片（img naturalWidth>0），缺位置块照常展示（`data-has-position=false`），页眉页脚不出现；翻页按页解析（mock 收到 `page-1.pdf`、`page-3.pdf`）；回到已解析页与重开文档直接取回（转换请求数不变）；**重启服务后新会话恢复内容且不重新解析**；解析失败状态+原因可见、重试按钮恢复 |
 | `tests/e2e/parse-unconfigured.spec.js` | 未配置解析服务降级：`/api/parse/service` `{configured:false}`、解析请求 503、状态 idle、结果 404；浏览器打开阅读不受影响，面板提示「解析服务未配置」 |
 
+### 原页与内容块双向联动（Issue #4）
+
+文件：`tests/e2e/linkage.spec.js`（串行，mock Docling 固定结果；固定数据 `linkage-page.json` 含 TOPLEFT 全块定位与一个 `BOTTOMLEFT` 坐标系样例，`broken-positions-page.json` 含零尺寸无效 bbox 与缺位置样例）。
+
+| # | 验收标准 | 用例与关键断言 |
+| --- | --- | --- |
+| 1 | 原页区域与右侧内容块支持双向悬浮高亮 | 「双向悬浮高亮」：每个带 bbox 的块有覆盖框（6/6）；悬浮右侧块 → 原页覆盖框 `.hot`，悬浮覆盖框 → 右侧块 `.hot`，移开/切换目标后高亮清除 |
+| 2 | 主动选择定位可找到另一侧对应内容 | 「主动定位」：缩小视口并放大到 120% 后点击右侧底部块 → 原页覆盖框 `.active` 且进入视口（此前不可见）；滚动右侧到底后点击覆盖框 → 右侧块进入视口，选中态独占 |
+| 3 | 正确处理页面缩放下的有效位置 | 「缩放后覆盖层按当前缩放重算」：120%/100%/83.3% 三档断言覆盖框渲染位置 = bbox（PDF 点坐标）× 当前缩放（±2px）；`BOTTOMLEFT` 样例按页面点高度翻转后仍准；重建不丢框、悬浮继续可用 |
+| 4 | 缺失或无效位置仍展示内容；悬浮失败静默，主动定位失败可提示 | 「缺失/无效位置」：零尺寸 bbox（`data-has-position=true`）与缺位置（`false`）块均照常展示且无覆盖框；悬浮静默（自身与原页均不高亮、无提示）；点击 → toast「没有可用位置」且状态仍「已完成」、无错误、无选中残留，提示约 3s 自动消失；同页有效块定位不受影响 |
+| 5 | 浏览器测试覆盖双向联动、缩放及无可用位置场景 | 上述用例均为真实浏览器操作（hover/click/缩放按钮/跳页），另覆盖「翻页后覆盖层按新页 bbox 重建并继续联动」 |
+| 6 | （审查 B1 回归）画布宽于可视区时主动定位仍可达 | 「画布宽于可视区」：窄视口（700px）+ 放大到 144% 使画布溢出 → 滚到最右后点击左侧内容块 → 原页覆盖框进入视口（此前完全在视口外）；反向点击覆盖框 → 右侧块进入视口 |
+
 ## 真实 Docling 接入验证
 
 非自动化层，验收时以真实服务执行（脚本已入库：仓库根目录运行 `node scripts/verify-real-docling.mjs`，结果记录见 PR 描述）：
@@ -55,3 +68,4 @@ npm test
 
 - `tests/fixtures/sample-a.pdf`（8 页）、`tests/fixtures/sample-b.pdf`（4 页）由 `scripts/make-fixtures.mjs`（pdf-lib）生成：带真实文字层、含标题/段落/表格/矢量图形页，创建日期固定。`npm run fixtures` 可再生成。
 - `tests/fixtures/docling/default-page.json`、`tests/fixtures/docling/page-3.json` 为固定 Docling 结果（DoclingDocument JSON）：标题/小节、段落（含缺位置样例）、无序/有序列表、4×3 表格（列头+数据）、内嵌 PNG 图片资源、furniture 页眉页脚（应被跳过）。
+- `tests/fixtures/docling/linkage-page.json`（双向联动样例页：全部块带位置，含 `BOTTOMLEFT` 坐标系样例）、`tests/fixtures/docling/broken-positions-page.json`（零尺寸无效 bbox 与缺位置样例）供联动用例使用。
