@@ -55,12 +55,17 @@ app.post(
   async (req, res, next) => {
     try {
       let name = '未命名.pdf';
-      const rawName = req.get('x-filename');
-      if (rawName) {
-        const decoded = path
-          .basename(decodeURIComponent(rawName).replace(/[\\/]+/g, '_'))
-          .trim();
-        if (decoded) name = decoded;
+      const rawHeader = req.get('x-filename');
+      if (rawHeader) {
+        let decoded;
+        try {
+          decoded = decodeURIComponent(rawHeader);
+        } catch {
+          // 非法编码（审查建议：客户端错误返回 400 而非 500）。
+          return res.status(400).json({ error: 'invalid x-filename header encoding' });
+        }
+        const basename = path.basename(decoded.replace(/[\\/]+/g, '_')).trim();
+        if (basename) name = basename;
         if (!/\.pdf$/i.test(name)) name += '.pdf';
         name = name.slice(0, 200);
       }

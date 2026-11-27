@@ -161,6 +161,11 @@ $('#settings-save').addEventListener('click', (event) => {
 /* ---------------- 阅读 ---------------- */
 
 function teardownReader() {
+  // 应用内导航（返回书库/切换文档）不触发 pagehide：在清掉去抖定时器与
+  // 销毁 viewer 之前先立即落盘，避免 400ms 窗口内的位置变更丢失（审查 B1）。
+  if (state.docId && state.viewer?.pdf) {
+    persistProgressNow();
+  }
   clearTimeout(state.saveTimer);
   state.saveTimer = 0;
   state.docId = null;
@@ -169,6 +174,9 @@ function teardownReader() {
     state.viewer.destroy();
     state.viewer = null;
   }
+  // 清除渲染完成标记，避免残留值干扰下次打开时的就绪判定。
+  delete $('#viewer').dataset.page;
+  delete $('#viewer').dataset.zoom;
 }
 
 function updateReaderUi({ page, zoom }) {
@@ -186,7 +194,7 @@ function scheduleSave() {
 async function persistProgressNow(useKeepalive = false) {
   clearTimeout(state.saveTimer);
   state.saveTimer = 0;
-  if (!state.docId || !state.viewer) return;
+  if (!state.docId || !state.viewer?.pdf) return;
   const { page, zoom } = state.viewer;
   try {
     await saveProgress(state.docId, page, zoom);

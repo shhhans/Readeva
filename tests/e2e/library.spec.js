@@ -168,3 +168,41 @@ test('重启服务后，新浏览器会话恢复上次阅读页与缩放', async
 
   await context.close();
 });
+
+test('翻页后立即返回书库，阅读位置仍落盘并可恢复（B1 回归）', async ({ page, request }) => {
+  await openReaderFromLibrary(page, 'sample-b.pdf');
+  const docId = new URL(page.url()).hash.split('/').pop();
+
+  // 同一 JS 任务内翻页后立即返回（审核官 caseA 触发方式，不等 400ms 去抖窗口）。
+  await page.evaluate(() => {
+    document.querySelector('#page-next').click();
+    document.querySelector('#back-button').click();
+  });
+  await expect(page.locator('#view-library')).toBeVisible();
+
+  // 应用内导航退出路径必须已落盘：无需等待去抖，服务端应立即出现 page=2。
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get(`${service.base}/api/documents/${docId}/progress`);
+        const { progress } = await res.json();
+        return String(progress.page);
+      },
+      { timeout: 8000, intervals: [200, 400, 800] },
+    )
+    .toBe('2');
+
+  // 再次打开同文档 → 恢复到第 2 页。
+  await openReaderFromLibrary(page, 'sample-b.pdf');
+  await expect(page.locator('#viewer')).toHaveAttribute('data-page', '2');
+});
+
+test('非法 x-filename 返回 400 而非 500', async ({ request }) => {
+  const res = await request.post(`${service.base}/api/documents/import`, {
+    headers: { 'x-filename': '%E4%B8%ZZ.pdf' },
+    data: fs.readFileSync(FIXTURE_A),
+  });
+  expect(res.status()).toBe(400);
+  const body = await res.json();
+  expect(body.error).toBeTruthy();
+});
