@@ -1,0 +1,99 @@
+{
+  "schema_name": "DoclingDocument",
+  "version": "1.2.0",
+  "name": "readeva-fixture-linkage-page",
+  "body": {
+    "self_ref": "#/body",
+    "children": [
+      { "$ref": "#/texts/0" },
+      { "$ref": "#/texts/1" },
+      { "$ref": "#/texts/2" },
+      { "$ref": "#/texts/3" },
+      { "$ref": "#/texts/4" },
+      { "$ref": "#/texts/5" }
+    ],
+    "content_layer": "body",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "groups": [],
+  "texts": [
+    {
+      "self_ref": "#/texts/0",
+      "label": "title",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 40.0, "r": 320.0, "b": 70.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 34]
+        }
+      ],
+      "text": "Sample A · Linkage fixture (Issue #4)"
+    },
+    {
+      "self_ref": "#/texts/1",
+      "label": "paragraph",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 90.0, "r": 540.0, "b": 200.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 300]
+        }
+      ],
+      "text": "Hovering a structured content block highlights the corresponding region on the original page, and hovering a region on the original page highlights the corresponding content block. This bidirectional highlight is silent: when a block has no usable position nothing happens and reading continues uninterrupted."
+    },
+    {
+      "self_ref": "#/texts/2",
+      "label": "paragraph",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 220.0, "r": 540.0, "b": 420.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 420]
+        }
+      ],
+      "text": "Active selection works in both directions as well. Clicking a content block scrolls the original page so the matching region is centered in view, and clicking a region on the original page scrolls the structured panel so the matching block is visible. The located pair stays marked until another block is selected or the page changes, so readers can keep their place while comparing both sides."
+    },
+    {
+      "self_ref": "#/texts/3",
+      "label": "paragraph",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 440.0, "r": 540.0, "b": 650.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 420]
+        }
+      ],
+      "text": "Positions are stored in PDF coordinates and must be converted with the current render zoom. Zooming in or out re-renders the page canvas and the overlay recalculates every region from the same bounding boxes, so the mapping between structured content and page regions remains accurate at every zoom level supported by the reader."
+    },
+    {
+      "self_ref": "#/texts/4",
+      "label": "paragraph",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 670.0, "r": 540.0, "b": 780.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 300]
+        }
+      ],
+      "text": "This paragraph sits near the bottom of the page. When the page is zoomed in, its region falls below the visible area, so clicking this block must scroll the original page to bring the region back into view."
+    },
+    {
+      "self_ref": "#/texts/5",
+      "label": "paragraph",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 400.0, "t": 800.0, "r": 560.0, "b": 760.0, "coord_origin": "BOTTOMLEFT" },
+          "charspan": [0, 60]
+        }
+      ],
+      "text": "This paragraph reports a BOTTOMLEFT coordinate bbox, which the client converts to top-left page coordinates."
+    }
+  ],
+  "pictures": [],
+  "tables": [],
+  "pages": {
+    "1": { "page_no": 1, "size": { "width": 595.28, "height": 841.89 } }
+  }
+}

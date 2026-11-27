@@ -155,13 +155,18 @@ async function main() {
     parseIds[page] = parse.parseId;
     parseMeta[page] = parse.meta;
     const kinds = {};
-    for (const block of parse.blocks) kinds[block.kind] = (kinds[block.kind] ?? 0) + 1;
+    const origins = {};
+    for (const block of parse.blocks) {
+      kinds[block.kind] = (kinds[block.kind] ?? 0) + 1;
+      if (block.bbox) origins[block.bbox.coordOrigin ?? 'none'] = (origins[block.bbox.coordOrigin ?? 'none'] ?? 0) + 1;
+    }
     const heading = parse.blocks.find((b) => b.kind === 'heading');
     const paragraph = parse.blocks.find((b) => b.kind === 'paragraph');
     const image = parse.blocks.find((b) => b.kind === 'image' && b.image?.uri);
     const table = parse.blocks.find((b) => b.kind === 'table' && b.rows?.length);
     const missingPos = parse.blocks.filter((b) => !b.bbox).length;
     log(`page ${page}: blocks=${parse.blocks.length} ${JSON.stringify(kinds)}`,
+      `bboxOrigins=${JSON.stringify(origins)}`,
       `heading=${heading?.text?.slice(0, 40) ?? '–'}`,
       `para=${paragraph?.text?.slice(0, 40) ?? '–'}`,
       table ? `tableRows=${table.rows.length}` : '',
@@ -200,6 +205,32 @@ async function main() {
   const headingText = await page.locator('#parse-content .parse-heading').first().textContent();
   const blockCount = await page.locator('#parse-content .parse-block').count();
   log(`browser: page=${await page.locator('#viewer').getAttribute('data-page')} heading=${headingText?.trim().slice(0, 50)} blocks=${blockCount}`);
+
+  // 7. 双向联动（Issue #4）在真实解析数据上的验证：
+  //    覆盖框数量 = 带 bbox 的块数；悬浮右侧块 → 原页对应区域高亮。
+  await page.waitForFunction(
+    () => document.querySelectorAll('#page-overlay .page-block-box').length > 0,
+    null,
+    { timeout: 10_000 },
+  );
+  const boxCount = await page.locator('#page-overlay .page-block-box').count();
+  const positionedCount = await page.locator('#parse-content .parse-block[data-bbox]').count();
+  if (boxCount !== positionedCount) {
+    throw new Error(`overlay boxes (${boxCount}) != positioned blocks (${positionedCount})`);
+  }
+  log(`linkage: overlay boxes=${boxCount} = positioned blocks=${positionedCount}`);
+  const firstBlockId = await page
+    .locator('#parse-content .parse-block[data-bbox]')
+    .first()
+    .getAttribute('data-block-id');
+  await page.locator(`#parse-content .parse-block[data-block-id="${firstBlockId}"]`).hover();
+  await page.waitForFunction(
+    (id) => document.querySelector(`#page-overlay .page-block-box[data-block-id="${id}"]`)?.classList.contains('hot'),
+    firstBlockId,
+    { timeout: 5_000 },
+  );
+  log(`linkage: hover block ${firstBlockId} → page box highlighted`);
+
   fs.mkdirSync(path.join(REPO, '.tmp'), { recursive: true });
   await page.screenshot({ path: path.join(REPO, '.tmp', 'real-docling-panel.png'), fullPage: false });
   log('screenshot saved: .tmp/real-docling-panel.png');

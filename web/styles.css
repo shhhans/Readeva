@@ -150,11 +150,62 @@ tbody tr:last-child td { border-bottom: none; }
   padding: 20px;
 }
 
-#pdf-canvas {
-  background: #fff;
-  box-shadow: 0 2px 14px rgba(15, 20, 40, 0.18);
+/* 原页容器：canvas 与覆盖层同轴缩放，覆盖框随渲染几何重算（Issue #4）。 */
+#page-stage {
+  position: relative;
   flex: none;
 }
+
+#pdf-canvas {
+  display: block;
+  background: #fff;
+  box-shadow: 0 2px 14px rgba(15, 20, 40, 0.18);
+}
+
+#page-overlay {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* 内容块覆盖框：默认透明不遮挡阅读；悬浮/选中时高亮。 */
+.page-block-box {
+  position: absolute;
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.page-block-box.hot {
+  background: rgba(67, 83, 255, 0.16);
+  border: 1px solid rgba(67, 83, 255, 0.8);
+  box-shadow: 0 0 0 1px rgba(67, 83, 255, 0.25);
+}
+
+.page-block-box.active {
+  background: rgba(67, 83, 255, 0.22);
+  border: 2px solid var(--accent);
+}
+
+/* 主动定位失败提示：短暂浮现，不阻断阅读操作。 */
+#locate-toast {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 80%;
+  padding: 9px 16px;
+  border-radius: 8px;
+  background: #303856;
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(15, 20, 40, 0.35);
+  z-index: 30;
+  pointer-events: none;
+}
+
+#view-reader { position: relative; }
 
 /* ---------------- 解析面板（Issue #3） ---------------- */
 
@@ -244,6 +295,20 @@ tbody tr:last-child td { border-bottom: none; }
 
 .parse-block {
   margin: 0 0 14px;
+  border-radius: 6px;
+}
+
+/* 双向联动高亮：悬浮与选中（不改布局，避免内容跳动）。 */
+.parse-block.hot {
+  background: var(--accent-weak);
+  outline: 1px solid rgba(67, 83, 255, 0.45);
+  outline-offset: 2px;
+}
+
+.parse-block.active {
+  background: var(--accent-weak);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .parse-heading {
