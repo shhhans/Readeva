@@ -9,6 +9,7 @@ import {
   setServiceBase,
 } from './api.js';
 import { PdfViewer } from './pdf-viewer.js';
+import { ParsePanel } from './parse-panel.js';
 
 const state = {
   view: 'library',
@@ -17,6 +18,7 @@ const state = {
   saveTimer: 0,
   // 阅读器就绪信号：渲染就绪前的操作会等待后执行。
   ready: Promise.resolve(),
+  parsePanel: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -174,6 +176,7 @@ function teardownReader() {
     state.viewer.destroy();
     state.viewer = null;
   }
+  if (state.parsePanel) state.parsePanel.reset();
   // 清除渲染完成标记，避免残留值干扰下次打开时的就绪判定。
   delete $('#viewer').dataset.page;
   delete $('#viewer').dataset.zoom;
@@ -236,6 +239,8 @@ async function showReader(docId) {
     state.ready = viewer.open(pdfFileUrl(docId), { page: progress.page, zoom: progress.zoom });
     const { page, zoom } = await state.ready;
     updateReaderUi({ page, zoom });
+    // 原页已渲染，右侧解析面板独立异步加载，不阻塞阅读。
+    state.parsePanel.showPage(docId, page);
   } catch (err) {
     showStatus($('#reader-error'), `无法打开文档：${err.message}`);
   }
@@ -249,9 +254,14 @@ async function applyViewerAction(action) {
     return; // 打开失败时忽略操作
   }
   if (!state.viewer?.pdf || state.view !== 'reader') return;
+  const previousPage = state.viewer.page;
   const result = await action();
   updateReaderUi(result);
   scheduleSave();
+  // 翻页后右侧面板跟随当前页；缩放不改页码，不重新加载解析。
+  if (result.page !== previousPage) {
+    state.parsePanel.showPage(state.docId, result.page);
+  }
 }
 
 $('#back-button').addEventListener('click', () => {
@@ -294,5 +304,8 @@ document.addEventListener('keydown', (event) => {
     applyViewerAction(() => state.viewer.zoomOut());
   }
 });
+
+// 右侧解析面板：展示当前页解析状态与结构化内容。
+state.parsePanel = new ParsePanel({ root: $('#parse-panel') });
 
 route();

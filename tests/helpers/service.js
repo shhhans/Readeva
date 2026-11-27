@@ -6,7 +6,7 @@ import path from 'node:path';
 const SERVER_ENTRY = path.resolve('server/index.js');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function launch(dataDir, port, host) {
+function launch(dataDir, port, host, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(
       process.execPath,
@@ -17,6 +17,7 @@ function launch(dataDir, port, host) {
           READEVA_PORT: String(port),
           READEVA_HOST: host,
           READEVA_DATA_DIR: dataDir,
+          ...extraEnv,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -62,13 +63,13 @@ function launch(dataDir, port, host) {
  * 启动独立服务进程（与生产 `npm start` 相同入口）。
  * port=0 时由 OS 分配端口并从服务输出解析实际地址。
  */
-export async function startService({ dataDir, port = 0, host = '127.0.0.1' } = {}) {
+export async function startService({ dataDir, port = 0, host = '127.0.0.1', env = {} } = {}) {
   const dir = dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'readeva-e2e-'));
   let attempt = 0;
   for (;;) {
     attempt += 1;
     try {
-      return await launch(dir, port, host);
+      return await launch(dir, port, host, env);
     } catch (err) {
       if (err.code === 'EADDRINUSE' && port !== 0 && attempt < 6) {
         await delay(400 * attempt);
