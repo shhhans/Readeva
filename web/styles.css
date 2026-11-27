@@ -285,6 +285,65 @@ tbody tr:last-child td { border-bottom: none; }
   word-break: break-all;
 }
 
+/* ---------------- 整本解析进度（Issue #5） ---------------- */
+
+.parse-progress {
+  flex: none;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.parse-progress-summary {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.parse-progress-pages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.parse-page-chip {
+  min-width: 30px;
+  padding: 2px 6px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.parse-page-chip.chip-idle {
+  background: #eef0f5;
+}
+
+.parse-page-chip.chip-queued {
+  background: var(--accent-weak);
+  border-color: #d9daff;
+  color: #3038a8;
+}
+
+.parse-page-chip.chip-running {
+  background: #fff7e0;
+  border-color: #f0dfae;
+  color: #8a6100;
+}
+
+.parse-page-chip.chip-succeeded {
+  background: #e5f6ec;
+  border-color: #bfe6cf;
+  color: #1c7c46;
+}
+
+.parse-page-chip.chip-failed {
+  background: #fdeaea;
+  border-color: #f2c1bd;
+  color: #b3261e;
+  font-weight: 600;
+}
+
 #parse-retry {
   margin: 10px 16px 0;
   align-self: flex-start;

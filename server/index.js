@@ -4,7 +4,7 @@ import express from 'express';
 import { Library, InvalidPdfError } from './library.js';
 import { DoclingAdapter } from './docling.js';
 import { ParseStore } from './parse-store.js';
-import { ParseTaskManager } from './page-tasks.js';
+import { ParseTaskManager, buildParseProgress } from './page-tasks.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -38,6 +38,12 @@ const config = {
       process.env.READEVA_DOCLING_TIMEOUT_MS ??
       300_000,
   ),
+  // 页解析并发上限（Issue #5）：与解析服务能力匹配，默认 1（docling_service 单线程串行）。
+  parseConcurrency: Number(
+    parseArg(process.argv, '--parse-concurrency') ??
+      process.env.READEVA_PARSE_CONCURRENCY ??
+      1,
+  ),
 };
 
 if (!Number.isFinite(config.port) || config.port < 0 || config.port > 65535) {
@@ -57,7 +63,12 @@ const doclingAdapter = config.doclingUrl
     })
   : null;
 const parseTasks = doclingAdapter
-  ? new ParseTaskManager({ store: parseStore, adapter: doclingAdapter, library })
+  ? new ParseTaskManager({
+      store: parseStore,
+      adapter: doclingAdapter,
+      library,
+      concurrency: config.parseConcurrency,
+    })
   : null;
 const app = express();
 app.disable('x-powered-by');
@@ -179,6 +190,12 @@ function parseStatusPayload(docId, page) {
   if (parseTasks?.isRunning(docId, page)) {
     return { page, status: 'running' };
   }
+  if (parseTasks?.isQueued(docId, page)) {
+    const payload = { page, status: 'queued' };
+    const position = parseTasks.queuePosition(docId, page);
+    if (position >= 0) payload.queuePosition = position;
+    return payload;
+  }
   const record = parseStore.getRecord(docId, page);
   if (!record) return { page, status: 'idle' };
   const payload = {
@@ -204,13 +221,18 @@ app.post('/api/documents/:id/pages/:page/parse', (req, res, next) => {
       const payload = parseStatusPayload(req.params.id, page);
       return res.json({ ...payload, reused: true });
     }
-    res.status(outcome === 'started' ? 202 : 200).json({ page, status: 'running' });
+    if (outcome === 'running') {
+      return res.status(200).json({ page, status: 'running' });
+    }
+    // started：并发空闲时立即开始；占满时进入队列（仍为 202 已接受）。
+    const state = parseTasks.stateOf(req.params.id, page);
+    res.status(202).json({ page, status: state === 'queued' ? 'queued' : 'running' });
   } catch (err) {
     next(err);
   }
 });
 
-// 任务状态：idle（未开始）/ running（已开始）/ succeeded / failed。
+// 任务状态：idle（未开始）/ queued（排队）/ running（已开始）/ succeeded / failed。
 app.get('/api/documents/:id/pages/:page/parse', (req, res) => {
   const page = resolvePageParam(req, res);
   if (page === null) return;
@@ -238,6 +260,46 @@ app.get('/api/documents/:id/pages/:page/parse/result', (req, res) => {
       updatedAt: record.updatedAt,
     },
   });
+});
+
+// 阅读页优先级更新（Issue #5）：阅读位置变化 → 服务端按「当前页及后续页优先，
+// 其余降级」重排未开始任务；不影响进行中的页；已完成/失败页不入队。
+app.put('/api/documents/:id/reading-position', (req, res, next) => {
+  try {
+    const doc = library.getDocument(req.params.id);
+    if (!doc) return res.status(404).json({ error: 'document not found' });
+    const page = Number(req.body?.page);
+    if (!Number.isInteger(page) || page < 1 || page > doc.pageCount) {
+      return res.status(400).json({ error: `page must be an integer in [1, ${doc.pageCount}]` });
+    }
+    if (!parseTasks) {
+      // 未配置解析服务：无可调度任务，位置本身有效（不视为错误）。
+      return res.json({ documentId: doc.id, page, scheduled: false });
+    }
+    parseTasks.updateReadingPosition(doc.id, page);
+    res.json({
+      documentId: doc.id,
+      page,
+      scheduled: true,
+      progress: parseTasks.progress(doc.id),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 整本解析进度查询（Issue #5）：逐页状态 + 整体进度 + 失败原因；
+// 基于 parse-store 持久化记录构建，服务重启后进度不丢。
+app.get('/api/documents/:id/parse/progress', (req, res) => {
+  const doc = library.getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'document not found' });
+  const progress = buildParseProgress({
+    store: parseStore,
+    library,
+    tasks: parseTasks,
+    docId: doc.id,
+  });
+  res.json(progress);
 });
 
 app.use('/api', (req, res) => {

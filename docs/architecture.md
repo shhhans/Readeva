@@ -57,13 +57,27 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 | GET | `/api/documents/:id/progress` | 阅读位置 `{ page, zoom, updatedAt }`（无记录时默认第 1 页、100%） |
 | PUT | `/api/documents/:id/progress` | 保存阅读位置；页码按 PDF 页数钳制，缩放钳制到 [0.25, 5] |
 | GET | `/api/parse/service` | 解析服务可用性 `{ configured, engine }`（不含地址/密钥） |
-| POST | `/api/documents/:id/pages/:page/parse` | **页解析请求**（幂等）：未开始 → 202 后台解析；进行中 → 200；已完成 → 200 `{ reused: true }` 复用不重新解析；未配置解析服务 → 503 |
-| GET | `/api/documents/:id/pages/:page/parse` | **任务状态**：`idle`（未开始）/ `running`（已开始）/ `succeeded`（含 `parseId`）/ `failed`（含 `error`） |
+| POST | `/api/documents/:id/pages/:page/parse` | **页解析请求**（幂等，兼作失败页显式重试）：未开始 → 202 后台解析；并发占满 → 202 `{status:"queued"}` 排队且置于队首；进行中 → 200；已完成 → 200 `{ reused: true }` 复用不重新解析；未配置解析服务 → 503 |
+| GET | `/api/documents/:id/pages/:page/parse` | **任务状态**：`idle`（未开始）/ `queued`（已接受、队列中）/ `running`（已开始）/ `succeeded`（含 `parseId`）/ `failed`（含 `error`） |
 | GET | `/api/documents/:id/pages/:page/parse/result` | **结果获取**：按页返回 `{ parse: { parseId, blocks, meta } }`；仅成功后可得，否则 404 |
+| PUT | `/api/documents/:id/reading-position` | **阅读页优先级更新**（Issue #5）：`{ page }` → 服务端按「当前页及后续页优先，其余降级」重排未开始任务，返回调度后的整本进度快照；未配置解析服务时 `{ scheduled: false }` |
+| GET | `/api/documents/:id/parse/progress` | **整本解析进度**（Issue #5）：逐页状态 + 计数（succeeded/failed/running/queued/idle、completed/total）+ 失败原因；基于持久化记录构建，服务重启后进度不丢 |
+| GET | `/api/documents/:id/parse/progress` | **整本解析进度**（Issue #5）：逐页状态 + 计数（succeeded/failed/running/queued/idle、completed/total）+ 失败原因；基于持久化记录构建，服务重启后进度不丢 |
 
 错误返回 `{ error }`；非 PDF 导入返回 400；未知文档返回 404；非法页码返回 400。
 
 解析任务在服务端后台执行（`server/page-tasks.js`）：抽取单页字节流（pdf-lib，固定元数据保证字节确定）→ 提交解析服务 → 轮询状态 → 取结果 → 规范化 → 自动持久保存（成功与失败都落盘）。服务重启丢失的进行中任务回落为「未开始」，已完成页永远从磁盘取回。
+
+## 按阅读位置的解析调度（Issue #5）
+
+`server/page-tasks.js` 的 `ParseTaskManager` 在单页编排之上维护**按文档的未开始任务优先队列**（内存态；已开始/成功/失败状态仍以 parse-store 落盘记录为唯一状态源，不另存一份）：
+
+- **优先级规则**：`PUT /api/documents/:id/reading-position` 上报阅读位置后，未开始任务按「当前页 → 后续页 → 前置页」升序重排；跳页只重排未开始任务，进行中的页不取消、不重复启动。
+- **队列成员**：仅收未开始（无落盘记录且未运行）的页；已完成页从队列摘除、复用结果；**失败页不入自动队列**——标记失败、不阻塞队列，仅通过显式解析请求（`POST …/parse`）重试，成功后由 `saveResult` 替换失败记录。
+- **派发**：全局并发上限可配置（`--parse-concurrency` / `READEVA_PARSE_CONCURRENCY`，默认 1，对齐 docling_service 单线程串行，跨文档共享）；任务结束（成功或失败）后继续派发队列下一页——队列按序补全其余未解析页（闲置补全）。
+- **显式请求插队**：`POST …/pages/:page/parse` 将目标页置于队首；并发空闲时立即开始（202 `running`），占满时排队（202 `queued`），状态端点相应返回 `queued`。
+- **进度查询**：`GET /api/documents/:id/parse/progress` 返回逐页状态（含队列位置与失败原因）与整体计数（completed/total）；已完成/失败页以落盘记录为准，服务重启后进度不丢。
+- **触发边界**：整本调度仅由阅读位置更新触发（客户端打开文档/翻页时上报）；单独的页解析请求不触发整本调度（Issue #3 行为保持）。客户端退出宽限期与重连重新调度属 Issue #6，本阶段队列一旦建立即运行至完成。
 
 ## 双向联动（Issue #4）
 
@@ -78,5 +92,5 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 
 ## 后续扩展边界（本任务不实现）
 
-- **页解析调度（Issue #5）**：当前页及后续页优先、跳页重排优先级、闲置补全剩余页、失败隔离与显式重试、客户端退出宽限期与重连重新调度；任务状态机与持久化基础已在本任务就位。
+- **客户端退出宽限期与重连重新调度（Issue #6）**：客户端退出/连接失效后完成已开始页并清除未开始排队、重连取回结果并重新调度；调度与持久化基础已在本任务就位。
 - **查词翻译、成果包导入导出**：译文将绑定「文档 + 页解析身份（parseId）」；成果包可从 `parses/` + `progress/` + 文档身份组成一致快照。

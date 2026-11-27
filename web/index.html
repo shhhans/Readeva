@@ -86,6 +86,11 @@
             <h2>结构化内容</h2>
             <span id="parse-status" class="parse-status" data-kind="idle">未开始</span>
           </header>
+          <!-- 整本解析进度（Issue #5）：逐页状态 + 整体进度，点击页码跳到对应页。 -->
+          <div id="parse-progress" class="parse-progress" hidden>
+            <p id="parse-progress-summary" class="parse-progress-summary"></p>
+            <div id="parse-progress-pages" class="parse-progress-pages"></div>
+          </div>
           <p id="parse-error" class="parse-error" hidden></p>
           <button id="parse-retry" type="button" hidden>重试解析</button>
           <p id="parse-hint" class="parse-hint" hidden>

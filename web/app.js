@@ -7,9 +7,10 @@ import {
   pdfFileUrl,
   getServiceBase,
   setServiceBase,
+  updateReadingPosition,
 } from './api.js';
 import { PdfViewer } from './pdf-viewer.js';
-import { ParsePanel } from './parse-panel.js';
+import { ParsePanel, PROGRESS_JUMP_EVENT } from './parse-panel.js';
 import { PageLinkage } from './page-linkage.js';
 
 const state = {
@@ -233,6 +234,8 @@ async function showReader(docId) {
     $('#page-total').textContent = String(doc.pageCount);
 
     const { progress } = await fetchProgress(docId);
+    // 上报阅读位置：服务端按「当前页及后续页优先，其余降级」调度整本解析（Issue #5）。
+    updateReadingPosition(docId, progress.page).catch(() => {});
 
     const viewer = new PdfViewer({ canvas: $('#pdf-canvas'), container: $('#viewer') });
     state.viewer = viewer;
@@ -262,6 +265,8 @@ async function applyViewerAction(action) {
   // 翻页后右侧面板跟随当前页；缩放不改页码，不重新加载解析。
   if (result.page !== previousPage) {
     state.parsePanel.showPage(state.docId, result.page);
+    // 阅读位置变化 → 服务端重排未开始任务优先级（Issue #5）。
+    updateReadingPosition(state.docId, result.page).catch(() => {});
   }
 }
 
@@ -308,6 +313,14 @@ document.addEventListener('keydown', (event) => {
 
 // 右侧解析面板：展示当前页解析状态与结构化内容。
 state.parsePanel = new ParsePanel({ root: $('#parse-panel') });
+
+// 整本进度页码芯片：点击跳到对应页，面板与覆盖层随当前页更新（Issue #5）。
+document.addEventListener(PROGRESS_JUMP_EVENT, (event) => {
+  if (state.view !== 'reader' || !state.docId || !state.viewer) return;
+  const page = event.detail?.page;
+  if (!Number.isInteger(page)) return;
+  applyViewerAction(() => state.viewer.goTo(page, state.viewer.zoom));
+});
 
 // 原页与内容块双向联动（Issue #4）：覆盖层、双向高亮与主动定位。
 const linkage = new PageLinkage({

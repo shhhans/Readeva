@@ -47,12 +47,15 @@ export function startMockDocling({
   byPage = {},
   pollsBeforeDone = 1,
   convertDelayMs = 0,
+  /** 按页固定失败：{ [页码]: 失败原因 }；运行时可用 setFailPages 切换。 */
+  failPages = {},
 } = {}) {
   const requests = [];
   const tasks = new Map(); // taskId -> { polls, outcome }
   let taskCounter = 0;
   let steps = null; // 行为脚本：逐次消耗；null = 始终成功
   let stepIndex = 0;
+  let pageFailures = { ...failPages };
 
   const nextOutcome = () => {
     if (!steps) return { mode: 'success', document: null };
@@ -80,7 +83,10 @@ export function startMockDocling({
 
       const pageMatch = /page-(\d+)\.pdf$/.exec(upload.filename ?? '');
       const page = pageMatch ? Number(pageMatch[1]) : null;
-      const outcome = nextOutcome();
+      const failMessage = pageFailures[String(page)];
+      const outcome = failMessage
+        ? { mode: 'failure', message: failMessage }
+        : nextOutcome();
       const task = {
         id: `mock-task-${++taskCounter}`,
         polls: 0,
@@ -172,6 +178,10 @@ export function startMockDocling({
         setBehavior(next) {
           steps = next;
           stepIndex = 0;
+        },
+        /** 运行时切换按页固定失败（null/{} = 清除）。优先于行为脚本。 */
+        setFailPages(next) {
+          pageFailures = { ...(next ?? {}) };
         },
         convertCalls() {
           return requests.filter((r) => r.kind === 'convert').length;

@@ -2,14 +2,20 @@ import {
   fetchParseService,
   fetchParseStatus,
   fetchParseResult,
+  fetchParseProgress,
   requestPageParse,
 } from './api.js';
 
 const POLL_INTERVAL_MS = 500;
 const POLL_MAX_MS = 10 * 60 * 1000;
+/** 整本进度轮询间隔：后台补全/失败也要在界面上可见（Issue #5）。 */
+const PROGRESS_POLL_INTERVAL_MS = 1000;
 
 /** 内容块列表变化事件：联动层据此重建原页覆盖框（Issue #4）。 */
 export const BLOCKS_CHANGED_EVENT = 'parse-blocks-changed';
+
+/** 点击整本进度页码芯片：阅读视图跳到对应页（Issue #5）。 */
+export const PROGRESS_JUMP_EVENT = 'parse-progress-jump';
 
 /**
  * 阅读视图右侧面板：展示当前页解析状态与结构化内容。
@@ -27,15 +33,29 @@ export class ParsePanel {
     this.retryEl = root.querySelector('#parse-retry');
     this.contentEl = root.querySelector('#parse-content');
     this.hintEl = root.querySelector('#parse-hint');
+    this.progressEl = root.querySelector('#parse-progress');
+    this.progressSummaryEl = root.querySelector('#parse-progress-summary');
+    this.progressPagesEl = root.querySelector('#parse-progress-pages');
     this.serviceConfigured = null; // null = 尚未探测
     this.docId = null;
     this.page = null;
     this.generation = 0;
     this.pollTimer = 0;
     this.pollDeadline = 0;
+    this.progressTimer = 0;
 
     this.retryEl.addEventListener('click', () => {
       this.startParse().catch(() => {});
+    });
+    // 整本进度页码芯片：点击跳到对应页（跳转逻辑由阅读视图处理，组件零耦合）。
+    this.progressPagesEl.addEventListener('click', (event) => {
+      const chip = event.target.closest('.parse-page-chip');
+      if (!chip) return;
+      const page = Number(chip.dataset.page);
+      if (!Number.isInteger(page) || page < 1) return;
+      this.root.dispatchEvent(
+        new CustomEvent(PROGRESS_JUMP_EVENT, { detail: { page }, bubbles: true }),
+      );
     });
   }
 
@@ -70,6 +90,8 @@ export class ParsePanel {
     this.generation += 1;
     clearTimeout(this.pollTimer);
     this.pollTimer = 0;
+    this.stopProgressPolling();
+    this.showProgress(false);
     this.docId = null;
     this.page = null;
     this.pollDeadline = 0;
@@ -91,6 +113,8 @@ export class ParsePanel {
     this.showRetry(false);
     this.clearContent();
     this.setStatus('未开始', 'idle');
+    // 整本进度独立轮询：后台补全/失败不依赖当前页状态（Issue #5）。
+    this.refreshProgress();
     this.load().catch((err) => {
       console.warn('解析面板加载失败', err);
     });
@@ -109,6 +133,8 @@ export class ParsePanel {
     if (!this.serviceConfigured) {
       this.setStatus('解析服务未配置', 'unavailable');
       this.hintEl.hidden = false;
+      this.stopProgressPolling();
+      this.showProgress(false);
       return;
     }
     this.hintEl.hidden = true;
@@ -146,6 +172,13 @@ export class ParsePanel {
       this.schedulePoll(generation);
       return;
     }
+    if (status.status === 'queued') {
+      // 已被调度器接受但并发占满：排在队列中等待解析。
+      this.setStatus('已排队，等待解析…', 'running');
+      if (!this.pollDeadline) this.pollDeadline = Date.now() + POLL_MAX_MS;
+      this.schedulePoll(generation);
+      return;
+    }
     // idle：未开始。
     if (startIfIdle) {
       await this.startParse(generation);
@@ -159,8 +192,9 @@ export class ParsePanel {
     const { docId, page } = this;
     this.showError('');
     this.showRetry(false);
+    let body;
     try {
-      await requestPageParse(docId, page);
+      body = await requestPageParse(docId, page);
     } catch (err) {
       if (generation !== this.generation) return;
       this.setStatus('解析失败', 'failed');
@@ -169,7 +203,7 @@ export class ParsePanel {
       return;
     }
     if (generation !== this.generation) return;
-    this.setStatus('解析中…', 'running');
+    this.setStatus(body?.status === 'queued' ? '已排队，等待解析…' : '解析中…', 'running');
     this.pollDeadline = Date.now() + POLL_MAX_MS;
     this.schedulePoll(generation);
   }
@@ -206,6 +240,77 @@ export class ParsePanel {
       return;
     }
     await this.refreshStatus(generation);
+  }
+
+  /* ---------------- 整本进度（Issue #5） ---------------- */
+
+  showProgress(visible) {
+    this.progressEl.hidden = !visible;
+    if (!visible) {
+      this.progressSummaryEl.textContent = '';
+      this.progressPagesEl.replaceChildren();
+    }
+  }
+
+  stopProgressPolling() {
+    clearTimeout(this.progressTimer);
+    this.progressTimer = 0;
+  }
+
+  /** 轮询整本解析进度：逐页状态、整体计数与失败原因；服务不可达时跳过本轮。 */
+  refreshProgress() {
+    if (!this.docId || this.serviceConfigured === false) return;
+    clearTimeout(this.progressTimer);
+    const generation = this.generation;
+    fetchParseProgress(this.docId)
+      .then((snapshot) => {
+        if (generation !== this.generation) return;
+        this.renderProgress(snapshot);
+      })
+      .catch(() => {
+        /* 服务不可达/重启中：跳过本轮，继续轮询 */
+      })
+      .finally(() => {
+        if (generation !== this.generation || this.serviceConfigured === false) return;
+        this.progressTimer = setTimeout(() => this.refreshProgress(), PROGRESS_POLL_INTERVAL_MS);
+      });
+  }
+
+  renderProgress(snapshot) {
+    // 未配置解析服务时保持隐藏（探测完成后的迟到响应不得重新显示）。
+    if (this.serviceConfigured === false) return;
+    this.showProgress(true);
+    const parts = [`已解析 ${snapshot.succeeded}/${snapshot.total}`];
+    if (snapshot.failed > 0) parts.push(`失败 ${snapshot.failed}`);
+    if (snapshot.running > 0) parts.push(`解析中 ${snapshot.running}`);
+    if (snapshot.queued > 0) parts.push(`排队 ${snapshot.queued}`);
+    this.progressSummaryEl.textContent = parts.join(' · ');
+
+    const fragment = document.createDocumentFragment();
+    for (const page of snapshot.pages ?? []) {
+      fragment.append(this.renderPageChip(page));
+    }
+    this.progressPagesEl.replaceChildren(fragment);
+  }
+
+  renderPageChip(page) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = `parse-page-chip chip-${page.status}`;
+    chip.dataset.page = String(page.page);
+    chip.dataset.status = page.status;
+    chip.textContent = String(page.page);
+    const labels = {
+      succeeded: '已解析',
+      failed: `解析失败：${page.error ?? '原因未知'}`,
+      running: '解析中',
+      queued: '排队等待解析',
+      idle: '未开始',
+    };
+    const label = `第 ${page.page} 页 ${labels[page.status] ?? page.status}`;
+    chip.title = label;
+    chip.setAttribute('aria-label', label);
+    return chip;
   }
 
   async loadResult(generation) {

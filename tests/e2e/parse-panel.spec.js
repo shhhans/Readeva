@@ -4,6 +4,7 @@ import { startService, stopService } from '../helpers/service.js';
 import { startMockDocling } from '../helpers/mock-docling.js';
 
 const FIXTURE_A = path.resolve('tests/fixtures/sample-a.pdf');
+const FIXTURE_B = path.resolve('tests/fixtures/sample-b.pdf');
 const PAGE3_DOC = path.resolve('tests/fixtures/docling/page-3.json');
 
 // 串行：打开 → 首页解析 → 跳页 → 复用 → 重启恢复 → 失败重试。
@@ -108,12 +109,16 @@ test('跳页到第 3 页：按页重新解析并展示列表、表格与图片�
   const natural = await img.evaluate((node) => node.naturalWidth);
   expect(natural).toBeGreaterThan(0);
 
-  // 解析按页独立：mock 收到的第 2 次转换请求是 page-3.pdf。
+  // 解析按页独立：第 3 页的解析发送的是 page-3.pdf 单页字节流。
+  // （Issue #5 起，打开文档后调度器会在后台补全整本，故只断言该页确实被请求；
+  // 提交顺序断言见 parse-scheduler.spec.js。）
   const converts = mock.requests.filter((r) => r.kind === 'convert');
-  expect(converts.map((r) => r.filename)).toEqual(['page-1.pdf', 'page-3.pdf']);
+  expect(converts.map((r) => r.filename)).toContain('page-3.pdf');
 });
 
 test('回到已解析页与重开文档：直接取回结果，不重新解析', async ({ page, context }) => {
+  // Issue #5 调度会在后台补全整本：先等待全部页解析完成，再验证已完成页复用。
+  await expect.poll(() => mock.convertCalls(), { timeout: 30000 }).toBe(8);
   const callsAfterParse = mock.convertCalls();
 
   // 打开文档（恢复到上次阅读的第 3 页，已解析 → 只取回），再回到第 1 页。
@@ -151,10 +156,16 @@ test('重启服务后新会话恢复解析内容，仍然不重新解析', async
 });
 
 test('解析失败状态与原因可见，重试后恢复', async ({ page }) => {
-  mock.setBehavior([{ mode: 'failure', message: 'mock conversion exploded' }]);
+  // Issue #5 调度会补全整本，sample-a 已全部解析；改用未解析的 sample-b 验证失败重试：
+  // 行为脚本第 1 次成功（打开即解析第 1 页），其后失败（第 2 页及队列后续）。
+  await page.goto(`${service.base}/`);
+  await page.setInputFiles('#import-input', FIXTURE_B);
+  await expect(page.locator('#library-tbody tr', { hasText: 'sample-b.pdf' })).toHaveCount(1);
 
-  await openReader(page, 'sample-a.pdf');
-  // 重启后恢复到上次阅读页（第 1 页）；跳到未解析的第 2 页触发新解析。
+  mock.setBehavior([{ mode: 'success' }, { mode: 'failure', message: 'mock conversion exploded' }]);
+
+  await openReader(page, 'sample-b.pdf');
+  // 跳到第 2 页：调度已在后台排队，该页解析失败（失败不阻塞其他页）。
   await page.fill('#page-input', '2');
   await page.press('#page-input', 'Enter');
   await expect(page.locator('#viewer')).toHaveAttribute('data-page', '2');
