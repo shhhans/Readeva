@@ -174,8 +174,10 @@ export class PageLinkage {
   }
 
   setHot(id, on) {
+    const box = this.queryBox(id);
+    if (!box) return; // 无覆盖框（无可用位置）：悬浮静默，两侧都不高亮
+    box.classList.toggle('hot', on);
     this.queryBlock(id)?.classList.toggle('hot', on);
-    this.queryBox(id)?.classList.toggle('hot', on);
   }
 
   /** 悬浮高亮（双向）：无对应位置时静默，不做任何事。 */
@@ -203,6 +205,22 @@ export class PageLinkage {
 
   /* ---------------- 主动定位 ---------------- */
 
+  /**
+   * 把元素居中滚动到指定滚动容器内（直接设 scrollTop/scrollLeft）。
+   * 不用 scrollIntoView：它可能连带滚动外层文档；且配合
+   * #viewer 的 flex-start + margin auto 布局，左侧区域始终可达。
+   */
+  scrollToCenter(container, el) {
+    const elRect = el.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const targetTop =
+      container.scrollTop + elRect.top - containerRect.top - (containerRect.height - elRect.height) / 2;
+    const targetLeft =
+      container.scrollLeft + elRect.left - containerRect.left - (containerRect.width - elRect.width) / 2;
+    container.scrollTop = Math.max(0, targetTop);
+    container.scrollLeft = Math.max(0, targetLeft);
+  }
+
   /** 点击右侧内容块：定位原页对应区域；无可用位置时提示（不打断阅读）。 */
   locateOnPage(block) {
     const id = block.dataset.blockId;
@@ -212,7 +230,7 @@ export class PageLinkage {
       return;
     }
     this.setActive(id);
-    box.scrollIntoView({ block: 'center', inline: 'center' });
+    this.scrollToCenter(this.viewer, box);
   }
 
   /** 点击原页覆盖框：定位右侧对应内容块。 */
@@ -221,7 +239,7 @@ export class PageLinkage {
     const block = this.queryBlock(id);
     if (!block) return; // 内容尚未就绪：静默
     this.setActive(id);
-    block.scrollIntoView({ block: 'center' });
+    this.scrollToCenter(this.content, block);
   }
 
   /* ---------------- 提示 ---------------- */

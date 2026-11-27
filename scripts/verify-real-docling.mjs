@@ -20,8 +20,21 @@ import { fileURLToPath } from 'node:url';
 // 仓库根目录以脚本位置推导，任意 CWD 下运行均可。
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(SCRIPT_DIR, '..');
-const PYTHON = 'D:/Environments/Miniforge/envs/readeva/python.exe';
-const PDF = 'D:/Coding/Readeva/Inflight Service Manual - Chapter 3 Business Service.pdf';
+// 本机默认路径可用环境变量覆盖（换机器/换样本时无需改代码）。
+const PYTHON = process.env.READEVA_VERIFY_PYTHON ?? 'D:/Environments/Miniforge/envs/readeva/python.exe';
+const PDF =
+  process.env.READEVA_VERIFY_PDF ??
+  'D:/Coding/Readeva/Inflight Service Manual - Chapter 3 Business Service.pdf';
+if (!fs.existsSync(PYTHON)) {
+  console.error(
+    `[verify] docling python 不存在: ${PYTHON}（可用 READEVA_VERIFY_PYTHON 指定 conda 环境 python.exe）`,
+  );
+  process.exit(1);
+}
+if (!fs.existsSync(PDF)) {
+  console.error(`[verify] 验收 PDF 不存在: ${PDF}（可用 READEVA_VERIFY_PDF 指定待验收 PDF 路径）`);
+  process.exit(1);
+}
 const PAGES = [1, 2, 4, 5, 7, 15];
 const DOCLING_PORT = 5001;
 const READEVA_PORT = 8899;

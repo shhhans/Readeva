@@ -204,13 +204,15 @@ test('缺失/无效位置：内容照常展示，悬浮静默，主动定位有�
   await expect(page.locator('.page-block-box[data-block-id="b1"]')).toHaveCount(0);
   await expect(page.locator('.page-block-box[data-block-id="b2"]')).toHaveCount(0);
 
-  // 悬浮无/无效位置的块：静默（无高亮、无提示、无报错）。
+  // 悬浮无/无效位置的块：静默（自身与原页都不高亮、无提示、无报错）。
   const toast = page.locator('#locate-toast');
   await degenerate.hover();
   await expect(toast).toBeHidden();
   await expect(page.locator('.page-block-box.hot')).toHaveCount(0);
+  await expect(degenerate).not.toHaveClass(/hot/);
   await missing.hover();
   await expect(toast).toBeHidden();
+  await expect(missing).not.toHaveClass(/hot/);
 
   // 主动定位无/无效位置：toast 提示，不打断阅读（状态不变、无错误、无选中残留）。
   await degenerate.click();
@@ -252,4 +254,42 @@ test('翻页后覆盖层跟随当前页：按新页 bbox 重建并继续联动',
   await tableBox.click();
   await expect(tableBlock).toHaveClass(/active/);
   await expect(tableBox).toHaveClass(/active/);
+});
+
+test('画布宽于可视区：点击左侧内容块仍能定位到滚动区外的原页区域', async ({ page }) => {
+  // 窄视口：#parse-panel 宽 320px（min-width），#viewer 仅 380px，画布 595px 溢出。
+  await page.setViewportSize({ width: 700, height: 800 });
+  await openReader(page, 'sample-a.pdf');
+  // 前序用例停在第 3 页：回到第 1 页（联动固定数据，块位置已知）。
+  await jumpToPage(page, 1);
+  await waitForPanelDone(page);
+
+  // 放大到 144% 加剧溢出（canvas 857px > viewer 380px）。
+  await page.click('#zoom-in');
+  await expect(page.locator('#viewer')).toHaveAttribute('data-zoom', '1.2');
+  await page.click('#zoom-in');
+  await expect(page.locator('#viewer')).toHaveAttribute('data-zoom', '1.44');
+
+  // 手动滚到最右：页面左侧区域（含标题覆盖框）在视口外。
+  await page.locator('#viewer').evaluate((el) => {
+    el.scrollLeft = el.scrollWidth;
+    el.scrollTop = 0;
+  });
+  const box0 = page.locator('.page-block-box[data-block-id="b0"]');
+  await expect(box0).not.toBeInViewport();
+
+  // 点击左侧标题内容块 → 原页滚动到对应区域，覆盖框进入视口。
+  await page.locator('#parse-content .parse-block[data-block-id="b0"]').click();
+  await expect(box0).toHaveClass(/active/);
+  await expect(box0).toBeInViewport({ ratio: 0.5 });
+
+  // 反向：点击左侧覆盖框 → 右侧对应块进入视口（窄视口下依然可用）。
+  await page.locator('#parse-content').evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  const block0 = page.locator('#parse-content .parse-block[data-block-id="b0"]');
+  await expect(block0).not.toBeInViewport();
+  await box0.click();
+  await expect(block0).toHaveClass(/active/);
+  await expect(block0).toBeInViewport();
 });

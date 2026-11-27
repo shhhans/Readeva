@@ -70,6 +70,8 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 原页与内容块的对照阅读在纯前端实现（`web/page-linkage.js`），服务端无新增接口：
 
 - **覆盖层**：`#page-stage`（position relative）包住 canvas，`#page-overlay` 覆盖层内按内容块 bbox 叠加定位框 `.page-block-box`。bbox（PDF 点坐标）→ 渲染坐标的换算系数取「canvas CSS 尺寸 / 页面点尺寸」，与 devicePixelRatio 无关，天然跟随缩放（含「适配宽度」）；`coordOrigin=BOTTOMLEFT` 时按页面点高度翻转后映射到顶部原点。
+- **滚动布局契约**：`#viewer` 用 `justify-content: flex-start` + `align-items: flex-start`、`#page-stage` 用 `margin: 0 auto`——画布宽/高于可视区时只向右/向下溢出，起始侧始终可达（居中溢出会使起始侧落在可滚动区之外，scrollLeft/scrollTop 无法为负，主动定位会静默失效）；不拉伸 stage 保证覆盖层贴合 canvas 实际尺寸。
+- **主动定位滚动**：直接设 `viewer.scrollTop/scrollLeft`（`#viewer`）与 `content.scrollTop`（右侧面板）居中目标元素，不用 `scrollIntoView`（可能连带滚动外层文档）。
 - **组件间零耦合**：数据全部经 DOM 与事件流转——渲染完成后 `PdfViewer` 在 `#viewer` 上派发 `pdf-rendered`（携带 page/zoom/页面点尺寸）；`ParsePanel` 渲染内容后派发 `parse-blocks-changed`，内容块带 `data-bbox`（原始 bbox JSON）。联动层监听两类事件重建覆盖框，翻页/缩放后位置自动重算，选中态跨缩放保留、跨翻页重置。
 - **双向交互**：悬浮右侧内容块 ↔ 悬浮原页覆盖框互相高亮（`.hot`）；点击右侧块 → 原页滚动定位到对应区域，点击覆盖框 → 右侧滚动定位到对应块（`.active` 选中态独占）。
 - **失败语义**：位置不可用（`bbox: null` 或无效坐标，如零尺寸/出页）的内容块照常展示、无覆盖框；悬浮静默（无框可亮即无操作）；主动定位失败给 `#locate-toast` 短提示（约 3s 自动消失），均不报错、不打断阅读。

@@ -146,14 +146,22 @@ tbody tr:last-child td { border-bottom: none; }
   flex: 1;
   overflow: auto;
   display: flex;
-  justify-content: center;
+  /* 画布宽/高于可视区时只向右/向下溢出，起始侧始终可达；小于可视区时仍居中。
+     若用 justify-content:center，居中溢出会使画布起始侧落在可滚动区之外
+     （scrollLeft/scrollTop 无法为负），定位/滚动都无法到达（审查 B1）。 */
+  justify-content: flex-start;
+  /* 防止 #page-stage 被 flex 默认 stretch 拉伸到容器高度：
+     覆盖层必须贴合 canvas 实际尺寸，否则超出部分的定位框会被裁剪。 */
+  align-items: flex-start;
   padding: 20px;
 }
 
-/* 原页容器：canvas 与覆盖层同轴缩放，覆盖框随渲染几何重算（Issue #4）。 */
+/* 原页容器：canvas 与覆盖层同轴缩放，覆盖框随渲染几何重算（Issue #4）。
+   margin auto 在有剩余空间时居中，溢出时归零（配合 #viewer 的 flex-start）。 */
 #page-stage {
   position: relative;
   flex: none;
+  margin: 0 auto;
 }
 
 #pdf-canvas {
