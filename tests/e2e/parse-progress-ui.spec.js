@@ -107,3 +107,22 @@ test('失败页展示失败原因，可显式重试且其他页继续处理', as
   await expect(page.locator('#parse-status')).toHaveText('已完成');
   expect(mock.convertCalls()).toBe(callsBefore + 5);
 });
+
+test('进度轮询自愈：队列与运行任务丢失且仍有未开始页时，自动重报阅读位置恢复调度', async ({ page }) => {
+  // 前置：sample-a 已全部解析（8/8）。
+  await openReader(page, 'sample-a.pdf');
+  const summary = page.locator('#parse-progress-summary');
+  const chips = page.locator('#parse-progress-pages .parse-page-chip');
+  await expect(summary).toHaveText('已解析 8/8', { timeout: 20000 });
+
+  // 模拟调度队列丢失 + 记录缺失（服务重启的等价状态）：删除第 8 页落盘记录。
+  const docId = new URL(page.url()).hash.split('/').pop();
+  fs.rmSync(path.join(service.dataDir, 'parses', docId, 'page-8.json'));
+  const before = mock.convertCalls();
+
+  // 进度轮询发现 idle=1 且无 queued/running → 自动重报阅读位置 → 第 8 页重新入队解析。
+  await expect(chips.nth(7)).toHaveAttribute('data-status', /idle|queued|running/, { timeout: 15000 });
+  await expect(summary).toHaveText('已解析 8/8', { timeout: 20000 });
+  await expect(chips.nth(7)).toHaveAttribute('data-status', 'succeeded');
+  expect(mock.convertCalls()).toBe(before + 1);
+});

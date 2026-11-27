@@ -4,12 +4,15 @@ import {
   fetchParseResult,
   fetchParseProgress,
   requestPageParse,
+  updateReadingPosition,
 } from './api.js';
 
 const POLL_INTERVAL_MS = 500;
 const POLL_MAX_MS = 10 * 60 * 1000;
 /** 整本进度轮询间隔：后台补全/失败也要在界面上可见（Issue #5）。 */
 const PROGRESS_POLL_INTERVAL_MS = 1000;
+/** 自愈重报阅读位置的冷却时间（避免无队列可建时重复请求）。 */
+const SELF_HEAL_COOLDOWN_MS = 10_000;
 
 /** 内容块列表变化事件：联动层据此重建原页覆盖框（Issue #4）。 */
 export const BLOCKS_CHANGED_EVENT = 'parse-blocks-changed';
@@ -43,6 +46,7 @@ export class ParsePanel {
     this.pollTimer = 0;
     this.pollDeadline = 0;
     this.progressTimer = 0;
+    this.lastSelfHealAt = 0;
 
     this.retryEl.addEventListener('click', () => {
       this.startParse().catch(() => {});
@@ -92,6 +96,7 @@ export class ParsePanel {
     this.pollTimer = 0;
     this.stopProgressPolling();
     this.showProgress(false);
+    this.lastSelfHealAt = 0;
     this.docId = null;
     this.page = null;
     this.pollDeadline = 0;
@@ -138,6 +143,8 @@ export class ParsePanel {
       return;
     }
     this.hintEl.hidden = true;
+    // 服务探测结论为已配置后才启动整本进度展示（避免未配置时进度区闪现）。
+    this.refreshProgress();
     await this.refreshStatus(generation, { startIfIdle: true });
   }
 
@@ -259,26 +266,41 @@ export class ParsePanel {
 
   /** 轮询整本解析进度：逐页状态、整体计数与失败原因；服务不可达时跳过本轮。 */
   refreshProgress() {
-    if (!this.docId || this.serviceConfigured === false) return;
+    // 以服务探测结果为准（pending 阶段不渲染，未配置时保持隐藏）。
+    if (!this.docId || this.serviceConfigured !== true) return;
     clearTimeout(this.progressTimer);
     const generation = this.generation;
     fetchParseProgress(this.docId)
       .then((snapshot) => {
         if (generation !== this.generation) return;
         this.renderProgress(snapshot);
+        // 低成本自愈：队列与进行中任务都丢失（如服务重启）且仍有未开始页时，
+        // 自动重新上报阅读位置恢复调度（带冷却；Issue #6 的完整重连调度另行交付）。
+        if (
+          this.serviceConfigured === true &&
+          snapshot.idle > 0 &&
+          snapshot.running === 0 &&
+          snapshot.queued === 0
+        ) {
+          const now = Date.now();
+          if (now - this.lastSelfHealAt > SELF_HEAL_COOLDOWN_MS) {
+            this.lastSelfHealAt = now;
+            updateReadingPosition(this.docId, this.page).catch(() => {});
+          }
+        }
       })
       .catch(() => {
         /* 服务不可达/重启中：跳过本轮，继续轮询 */
       })
       .finally(() => {
-        if (generation !== this.generation || this.serviceConfigured === false) return;
+        if (generation !== this.generation || this.serviceConfigured !== true) return;
         this.progressTimer = setTimeout(() => this.refreshProgress(), PROGRESS_POLL_INTERVAL_MS);
       });
   }
 
   renderProgress(snapshot) {
-    // 未配置解析服务时保持隐藏（探测完成后的迟到响应不得重新显示）。
-    if (this.serviceConfigured === false) return;
+    // 未配置/尚未探测完成时保持隐藏（迟到的响应不得显示进度区）。
+    if (this.serviceConfigured !== true) return;
     this.showProgress(true);
     const parts = [`已解析 ${snapshot.succeeded}/${snapshot.total}`];
     if (snapshot.failed > 0) parts.push(`失败 ${snapshot.failed}`);

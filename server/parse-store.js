@@ -15,6 +15,12 @@ export class ParseStore {
   constructor(dataDir) {
     this.root = path.join(path.resolve(dataDir), 'parses');
     fs.mkdirSync(this.root, { recursive: true });
+    /**
+     * 轻量状态索引缓存（B1）：`<docId>:<page>` → { mtimeMs, size, status }。
+     * 只缓存 status/parseId/error/updatedAt 几个字段，不缓存 blocks/base64 图片；
+     * 进度快照、优先级重排与单页状态查询按 mtime+size 命中，避免每轮全量读盘。
+     */
+    this.statusCache = new Map();
   }
 
   docDir(docId) {
@@ -28,6 +34,45 @@ export class ParseStore {
   /** 读取持久化记录；无记录返回 null（即「未开始」）。 */
   getRecord(docId, page) {
     return readJson(this.pageFile(docId, page), null);
+  }
+
+  /**
+   * 轻量状态读取（B1）：仅返回状态字段，供进度快照、优先级重排与单页状态查询
+   * 使用——不解析 blocks/图片资源。按 mtime+size 判定缓存有效性；记录不存在或
+   * 已被外部删除时返回 null 并清缓存。
+   */
+  getStatus(docId, page) {
+    const file = this.pageFile(docId, page);
+    const key = `${docId}:${page}`;
+    let stat;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      this.statusCache.delete(key);
+      return null;
+    }
+    const cached = this.statusCache.get(key);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached.status;
+    }
+    const record = readJson(file, null);
+    if (!record) {
+      this.statusCache.delete(key);
+      return null;
+    }
+    const status = {
+      status: record.status,
+      parseId: record.parseId ?? null,
+      error: record.error ?? null,
+      updatedAt: record.updatedAt ?? null,
+    };
+    this.statusCache.set(key, { mtimeMs: stat.mtimeMs, size: stat.size, status });
+    return status;
+  }
+
+  /** 写路径主动失效缓存，保证下一次 getStatus 读到最新状态。 */
+  invalidateStatus(docId, page) {
+    this.statusCache.delete(`${docId}:${page}`);
   }
 
   hasSucceeded(docId, page) {
@@ -51,6 +96,7 @@ export class ParseStore {
       updatedAt: new Date().toISOString(),
     };
     await writeFileAtomic(this.pageFile(docId, page), JSON.stringify(record, null, 2));
+    this.invalidateStatus(docId, page);
     return record;
   }
 
@@ -70,6 +116,7 @@ export class ParseStore {
       updatedAt: new Date().toISOString(),
     };
     await writeFileAtomic(this.pageFile(docId, page), JSON.stringify(record, null, 2));
+    this.invalidateStatus(docId, page);
     return record;
   }
 }

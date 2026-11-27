@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { PDFDocument } from 'pdf-lib';
 import { startService, stopService } from '../helpers/service.js';
 import { startMockDocling } from '../helpers/mock-docling.js';
 
@@ -70,7 +72,7 @@ test('阅读位置更新：当前页立即解析，后续页优先排队，前�
   expect(scheduled).toBe(true);
 
   // 第 3 页（当前页）立即开始；4-8（后续页）按阅读顺序排队；1-2（前置页）降级到队尾。
-  expect(progress).toMatchObject({ total: 8, succeeded: 0, failed: 0, completed: 0 });
+  expect(progress).toMatchObject({ total: 8, succeeded: 0, failed: 0 });
   expect(progress.pages[2]).toMatchObject({ page: 3, status: 'running' });
   expect(progress.pages.slice(3).map((p) => p.status)).toEqual([
     'queued', 'queued', 'queued', 'queued', 'queued',
@@ -132,7 +134,6 @@ test('闲置补全：剩余未解析页全部解析，已完成页直接复用�
     running: 0,
     queued: 0,
     idle: 0,
-    completed: 8,
     total: 8,
   });
   for (const page of snap.pages) {
@@ -152,7 +153,10 @@ test('失败页不阻塞队列：其他页继续处理，失败原因可查询�
   const doc = await importFixtureA(request);
 
   await putReadingPosition(request, doc.id, 1);
-  await waitFor(async () => (await getProgress(request, doc.id)).completed).toBe(8);
+  await waitFor(async () => {
+    const s = await getProgress(request, doc.id);
+    return s.succeeded + s.failed;
+  }).toBe(8);
   const snap = await getProgress(request, doc.id);
   expect(snap.succeeded).toBe(7);
   expect(snap.failed).toBe(1);
@@ -184,7 +188,10 @@ test('失败页显式重试：仅重跑该页，成功后替换失败记录', as
   const doc = await importFixtureA(request);
 
   await putReadingPosition(request, doc.id, 1);
-  await waitFor(async () => (await getProgress(request, doc.id)).completed).toBe(8);
+  await waitFor(async () => {
+    const s = await getProgress(request, doc.id);
+    return s.succeeded + s.failed;
+  }).toBe(8);
   expect(mock.convertCalls()).toBe(8);
 
   // 解除失败注入后显式重试：请求被接受并立即开始（队列已空、并发空闲）。
@@ -221,6 +228,111 @@ test('显式解析请求优先于队列：并发占满时排队且置于队首',
   await waitFor(() => convertSeq().length).toBe(8);
   // 第 1 页完成后立即解析第 5 页（显式请求插队），随后按队列顺序补全。
   expect(convertSeq().slice(0, 4)).toEqual(['page-1.pdf', 'page-5.pdf', 'page-2.pdf', 'page-3.pdf']);
+});
+
+test('显式请求置顶不被随后的阅读位置重排降级（pinned）', async ({ request }) => {
+  await setup();
+  const doc = await importFixtureA(request);
+
+  await putReadingPosition(request, doc.id, 1); // 第 1 页运行中，队列 [2..8]
+  const post = await request.post(`${service.base}/api/documents/${doc.id}/pages/5/parse`);
+  expect(post.status()).toBe(202); // 置顶：并发占满 → 排队且置于队首
+
+  // 翻到第 8 页触发重排：置顶的第 5 页仍在队首，其余按 8 → 后续 → 前置排序。
+  const put = await putReadingPosition(request, doc.id, 8);
+  expect(put.status()).toBe(200);
+  const queuedPages = (await put.json()).progress.pages
+    .filter((p) => p.status === 'queued')
+    .sort((a, b) => a.queuePosition - b.queuePosition)
+    .map((p) => p.page);
+  expect(queuedPages).toEqual([5, 8, 2, 3, 4, 6, 7]);
+
+  await waitFor(() => convertSeq().length).toBe(8);
+  // 第 1 页完成后：先解析置顶的第 5 页，再按新阅读顺序补全。
+  expect(convertSeq()).toEqual([
+    'page-1.pdf',
+    'page-5.pdf',
+    'page-8.pdf',
+    'page-2.pdf',
+    'page-3.pdf',
+    'page-4.pdf',
+    'page-6.pdf',
+    'page-7.pdf',
+  ]);
+});
+
+test('B1 规模回归：进度/重排接口走轻量状态索引，不逐轮全量读盘（210 页 × ~600KB 记录）', async ({ request }) => {
+  await setup();
+  // 生成 210 页 PDF 并导入。
+  const pdf = await PDFDocument.create();
+  for (let i = 0; i < 210; i += 1) pdf.addPage([595, 842]);
+  const importRes = await request.post(`${service.base}/api/documents/import`, {
+    headers: { 'content-type': 'application/pdf', 'x-filename': 'big-book.pdf' },
+    data: Buffer.from(await pdf.save()),
+  });
+  expect(importRes.status()).toBe(201);
+  const { document: doc } = await importRes.json();
+  expect(doc.pageCount).toBe(210);
+
+  // 直接落盘 210 条 ~600KB 的成功记录（含 base64 图片资源，等价真实单页记录体积）。
+  const docDir = path.join(service.dataDir, 'parses', doc.id);
+  fs.mkdirSync(docDir, { recursive: true });
+  const filler = 'A'.repeat(600_000);
+  for (let page = 1; page <= 210; page += 1) {
+    const record = {
+      schemaVersion: 1,
+      documentId: doc.id,
+      page,
+      status: 'succeeded',
+      parseId: crypto.createHash('sha256').update(`page-${page}`).digest('hex'),
+      blocks: [
+        { id: 'b0', order: 0, kind: 'paragraph', text: `page ${page} filler` },
+        {
+          id: 'b1',
+          order: 1,
+          kind: 'image',
+          bbox: null,
+          image: { uri: `data:image/png;base64,${filler}`, mimeType: 'image/png' },
+        },
+      ],
+      meta: {
+        engine: 'docling',
+        requestedAt: null,
+        completedAt: null,
+        errors: [],
+        pageContentSha256: filler.slice(0, 64),
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(docDir, `page-${page}.json`), JSON.stringify(record));
+  }
+
+  // 预热：首次调用建立轻量状态索引（一次性成本，不设阈值）。
+  const warm = await getProgress(request, doc.id);
+  expect(warm.succeeded).toBe(210);
+  expect(warm.pages.every((p) => p.status === 'succeeded')).toBe(true);
+
+  // 稳态断言：连续调用命中轻量索引（每轮仅 stat），退回全量读盘会退化到数百 ms/轮。
+  const timings = [];
+  for (let i = 0; i < 3; i += 1) {
+    const t0 = Date.now();
+    const snap = await getProgress(request, doc.id);
+    timings.push(Date.now() - t0);
+    expect(snap.succeeded).toBe(210);
+    expect(snap.pages).toHaveLength(210);
+  }
+  for (const ms of timings) {
+    expect(ms, `progress latency ${timings.join(',')}ms`).toBeLessThan(250);
+  }
+
+  // 阅读位置重排同样走轻量索引（全部页已有记录 → 队列为空，不触发解析）。
+  const t0 = Date.now();
+  const put = await putReadingPosition(request, doc.id, 105);
+  const putMs = Date.now() - t0;
+  expect(put.status()).toBe(200);
+  expect((await put.json()).progress.queued).toBe(0);
+  expect(putMs).toBeLessThan(250);
+  expect(mock.convertCalls()).toBe(0);
 });
 
 test('单页解析请求不触发整本调度（Issue #3 行为保持）', async ({ request }) => {

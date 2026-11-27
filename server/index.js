@@ -196,7 +196,8 @@ function parseStatusPayload(docId, page) {
     if (position >= 0) payload.queuePosition = position;
     return payload;
   }
-  const record = parseStore.getRecord(docId, page);
+  // 轻量状态（B1）：单页状态轮询不读内容块，只取状态字段。
+  const record = parseStore.getStatus(docId, page);
   if (!record) return { page, status: 'idle' };
   const payload = {
     page,
@@ -289,7 +290,7 @@ app.put('/api/documents/:id/reading-position', (req, res, next) => {
 });
 
 // 整本解析进度查询（Issue #5）：逐页状态 + 整体进度 + 失败原因；
-// 基于 parse-store 持久化记录构建，服务重启后进度不丢。
+// 基于 parse-store 轻量状态索引构建（B1：不逐轮全量读盘），服务重启后进度不丢。
 app.get('/api/documents/:id/parse/progress', (req, res) => {
   const doc = library.getDocument(req.params.id);
   if (!doc) return res.status(404).json({ error: 'document not found' });
