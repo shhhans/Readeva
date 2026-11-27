@@ -1,0 +1,372 @@
+{
+  "schema_name": "DoclingDocument",
+  "version": "1.2.0",
+  "name": "readeva-fixture-page3",
+  "body": {
+    "self_ref": "#/body",
+    "children": [
+      { "$ref": "#/texts/0" },
+      { "$ref": "#/texts/1" },
+      { "$ref": "#/groups/0" },
+      { "$ref": "#/tables/0" },
+      { "$ref": "#/pictures/0" },
+      { "$ref": "#/groups/1" },
+      { "$ref": "#/texts/6" },
+      { "$ref": "#/texts/7" }
+    ],
+    "content_layer": "body",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "groups": [
+    {
+      "self_ref": "#/groups/0",
+      "parent": { "$ref": "#/body" },
+      "children": [
+        { "$ref": "#/texts/2" },
+        { "$ref": "#/texts/3" }
+      ],
+      "content_layer": "body",
+      "name": "list",
+      "label": "list"
+    },
+    {
+      "self_ref": "#/groups/1",
+      "parent": { "$ref": "#/body" },
+      "children": [
+        { "$ref": "#/texts/4" },
+        { "$ref": "#/texts/5" }
+      ],
+      "content_layer": "body",
+      "name": "ordered-list",
+      "label": "list"
+    }
+  ],
+  "texts": [
+    {
+      "self_ref": "#/texts/0",
+      "label": "title",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 40.0, "r": 300.0, "b": 70.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 21]
+        }
+      ],
+      "text": "Sample A · Chapter 2"
+    },
+    {
+      "self_ref": "#/texts/1",
+      "label": "section_header",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 90.0, "r": 240.0, "b": 110.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 17]
+        }
+      ],
+      "text": "Cabin equipment checks"
+    },
+    {
+      "self_ref": "#/texts/2",
+      "label": "list_item",
+      "parent": { "$ref": "#/groups/0" },
+      "children": [],
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 60.0, "t": 120.0, "r": 380.0, "b": 140.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 33]
+        }
+      ],
+      "text": "Check the cabin pressure indicator.",
+      "enumerated": false,
+      "marker": ""
+    },
+    {
+      "self_ref": "#/texts/3",
+      "label": "list_item",
+      "parent": { "$ref": "#/groups/0" },
+      "children": [],
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 60.0, "t": 145.0, "r": 380.0, "b": 165.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 34]
+        }
+      ],
+      "text": "Verify the service manual revision.",
+      "enumerated": false,
+      "marker": ""
+    },
+    {
+      "self_ref": "#/texts/4",
+      "label": "list_item",
+      "parent": { "$ref": "#/groups/1" },
+      "children": [],
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 60.0, "t": 420.0, "r": 400.0, "b": 440.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 28]
+        }
+      ],
+      "text": "Remove the checklist card from the rack.",
+      "enumerated": true,
+      "marker": "1."
+    },
+    {
+      "self_ref": "#/texts/5",
+      "label": "list_item",
+      "parent": { "$ref": "#/groups/1" },
+      "children": [],
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 60.0, "t": 445.0, "r": 400.0, "b": 465.0, "coord_origin": "TOPLEFT" },
+          "charspan": [0, 24]
+        }
+      ],
+      "text": "Stow the spare label set.",
+      "enumerated": true,
+      "marker": "2."
+    },
+    {
+      "self_ref": "#/texts/6",
+      "label": "paragraph",
+      "prov": [],
+      "text": "The figure caption has no provenance position and must still be displayed."
+    },
+    {
+      "self_ref": "#/texts/7",
+      "label": "page_footer",
+      "content_layer": "furniture",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 790.0, "r": 540.0, "b": 800.0, "coord_origin": "TOPLEFT" }
+        }
+      ],
+      "text": "Sample A — fixture generated for Readeva tests 3 / 8"
+    }
+  ],
+  "pictures": [
+    {
+      "self_ref": "#/pictures/0",
+      "label": "picture",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 200.0, "r": 276.0, "b": 340.0, "coord_origin": "TOPLEFT" }
+        }
+      ],
+      "image": {
+        "mimetype": "image/png",
+        "dpi": 144,
+        "size": { "width": 8, "height": 8 },
+        "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGNwDv6PFTEMLQkAYRFlQUWvBoMAAAAASUVORK5CYII="
+      }
+    }
+  ],
+  "tables": [
+    {
+      "self_ref": "#/tables/0",
+      "label": "table",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": { "l": 56.0, "t": 360.0, "r": 516.0, "b": 404.0, "coord_origin": "TOPLEFT" }
+        }
+      ],
+      "num_rows": 4,
+      "num_cols": 3,
+      "data": {
+        "num_rows": 4,
+        "num_cols": 3,
+        "table_cells": [
+          {
+            "bbox": { "l": 56.0, "t": 360.0, "r": 276.0, "b": 371.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "Item",
+            "column_header": true,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 276.0, "t": 360.0, "r": 386.0, "b": 371.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 1,
+            "end_col_offset_idx": 2,
+            "text": "Qty",
+            "column_header": true,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 386.0, "t": 360.0, "r": 516.0, "b": 371.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 0,
+            "end_row_offset_idx": 1,
+            "start_col_offset_idx": 2,
+            "end_col_offset_idx": 3,
+            "text": "Location",
+            "column_header": true,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 56.0, "t": 371.0, "r": 276.0, "b": 382.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 1,
+            "end_row_offset_idx": 2,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "Service manual",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 276.0, "t": 371.0, "r": 386.0, "b": 382.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 1,
+            "end_row_offset_idx": 2,
+            "start_col_offset_idx": 1,
+            "end_col_offset_idx": 2,
+            "text": "1",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 386.0, "t": 371.0, "r": 516.0, "b": 382.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 1,
+            "end_row_offset_idx": 2,
+            "start_col_offset_idx": 2,
+            "end_col_offset_idx": 3,
+            "text": "Chapter 3",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 56.0, "t": 382.0, "r": 276.0, "b": 393.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 2,
+            "end_row_offset_idx": 3,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "Checklist card",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 276.0, "t": 382.0, "r": 386.0, "b": 393.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 2,
+            "end_row_offset_idx": 3,
+            "start_col_offset_idx": 1,
+            "end_col_offset_idx": 2,
+            "text": "2",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 386.0, "t": 382.0, "r": 516.0, "b": 393.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 2,
+            "end_row_offset_idx": 3,
+            "start_col_offset_idx": 2,
+            "end_col_offset_idx": 3,
+            "text": "Cabin rack",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 56.0, "t": 393.0, "r": 276.0, "b": 404.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 3,
+            "end_row_offset_idx": 4,
+            "start_col_offset_idx": 0,
+            "end_col_offset_idx": 1,
+            "text": "Spare label set",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 276.0, "t": 393.0, "r": 386.0, "b": 404.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 3,
+            "end_row_offset_idx": 4,
+            "start_col_offset_idx": 1,
+            "end_col_offset_idx": 2,
+            "text": "4",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false
+          },
+          {
+            "bbox": { "l": 386.0, "t": 393.0, "r": 516.0, "b": 404.0, "coord_origin": "TOPLEFT" },
+            "row_span": 1,
+            "col_span": 1,
+            "start_row_offset_idx": 3,
+            "end_row_offset_idx": 4,
+            "start_col_offset_idx": 2,
+            "end_col_offset_idx": 3,
+            "text": "Storage bin",
+            "column_header": false,
+            "row_header": false,
+            "row_section": false
+          }
+        ],
+        "grid": [
+          [
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 0, "end_row_offset_idx": 1, "start_col_offset_idx": 0, "end_col_offset_idx": 1, "text": "Item", "column_header": true, "row_header": false, "row_section": false },
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 0, "end_row_offset_idx": 1, "start_col_offset_idx": 1, "end_col_offset_idx": 2, "text": "Qty", "column_header": true, "row_header": false, "row_section": false },
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 0, "end_row_offset_idx": 1, "start_col_offset_idx": 2, "end_col_offset_idx": 3, "text": "Location", "column_header": true, "row_header": false, "row_section": false }
+          ],
+          [
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 1, "end_row_offset_idx": 2, "start_col_offset_idx": 0, "end_col_offset_idx": 1, "text": "Service manual", "column_header": false, "row_header": false, "row_section": false },
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 1, "end_row_offset_idx": 2, "start_col_offset_idx": 1, "end_col_offset_idx": 2, "text": "1", "column_header": false, "row_header": false, "row_section": false },
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 1, "end_row_offset_idx": 2, "start_col_offset_idx": 2, "end_col_offset_idx": 3, "text": "Chapter 3", "column_header": false, "row_header": false, "row_section": false }
+          ],
+          [
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 2, "end_row_offset_idx": 3, "start_col_offset_idx": 0, "end_col_offset_idx": 1, "text": "Checklist card", "column_header": false, "row_header": false, "row_section": false },
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 2, "end_row_offset_idx": 3, "start_col_offset_idx": 1, "end_col_offset_idx": 2, "text": "2", "column_header": false, "row_header": false, "row_section": false },
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 2, "end_row_offset_idx": 3, "start_col_offset_idx": 2, "end_col_offset_idx": 3, "text": "Cabin rack", "column_header": false, "row_header": false, "row_section": false }
+          ],
+          [
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 3, "end_row_offset_idx": 4, "start_col_offset_idx": 0, "end_col_offset_idx": 1, "text": "Spare label set", "column_header": false, "row_header": false, "row_section": false },
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 3, "end_row_offset_idx": 4, "start_col_offset_idx": 1, "end_col_offset_idx": 2, "text": "4", "column_header": false, "row_header": false, "row_section": false },
+            { "row_span": 1, "col_span": 1, "start_row_offset_idx": 3, "end_row_offset_idx": 4, "start_col_offset_idx": 2, "end_col_offset_idx": 3, "text": "Storage bin", "column_header": false, "row_header": false, "row_section": false }
+          ]
+        ]
+      }
+    }
+  ],
+  "pages": {
+    "1": { "page_no": 1, "size": { "width": 595.28, "height": 841.89 } }
+  }
+}

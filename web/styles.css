@@ -136,6 +136,12 @@ tbody tr:last-child td { border-bottom: none; }
 
 #reader-error { margin: 12px 20px; }
 
+#reader-split {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
 #viewer {
   flex: 1;
   overflow: auto;
@@ -148,6 +154,154 @@ tbody tr:last-child td { border-bottom: none; }
   background: #fff;
   box-shadow: 0 2px 14px rgba(15, 20, 40, 0.18);
   flex: none;
+}
+
+/* ---------------- 解析面板（Issue #3） ---------------- */
+
+#parse-panel {
+  flex: none;
+  width: 40%;
+  min-width: 320px;
+  max-width: 640px;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.parse-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.parse-panel-header h2 {
+  font-size: 14px;
+  margin: 0;
+  font-weight: 600;
+}
+
+.parse-status {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: #3038a8;
+}
+
+.parse-status[data-kind='running'] {
+  background: #fff7e0;
+  color: #8a6100;
+}
+
+.parse-status[data-kind='succeeded'] {
+  background: #e5f6ec;
+  color: #1c7c46;
+}
+
+.parse-status[data-kind='failed'] {
+  background: #fdeaea;
+  color: #b3261e;
+}
+
+.parse-status[data-kind='idle'],
+.parse-status[data-kind='unavailable'] {
+  background: #eef0f5;
+  color: var(--muted);
+}
+
+.parse-error {
+  margin: 10px 16px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fdeaea;
+  color: #b3261e;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+#parse-retry {
+  margin: 10px 16px 0;
+  align-self: flex-start;
+}
+
+.parse-content {
+  flex: 1;
+  overflow: auto;
+  padding: 14px 16px 24px;
+}
+
+.parse-hint,
+.parse-empty {
+  color: var(--muted);
+}
+
+.parse-block {
+  margin: 0 0 14px;
+}
+
+.parse-heading {
+  margin: 14px 0 6px;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+h4.parse-heading {
+  font-size: 13px;
+  color: #3c4257;
+}
+
+.parse-paragraph {
+  margin: 0;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.parse-list {
+  margin: 0;
+  padding-left: 22px;
+  line-height: 1.7;
+}
+
+.parse-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.parse-table th,
+.parse-table td {
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.parse-table th {
+  background: #fafbfe;
+}
+
+.parse-figure {
+  margin: 0;
+}
+
+.parse-image {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.parse-placeholder {
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 10px;
 }
 
 dialog {

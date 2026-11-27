@@ -2,6 +2,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { Library, InvalidPdfError } from './library.js';
+import { DoclingAdapter } from './docling.js';
+import { ParseStore } from './parse-store.js';
+import { ParseTaskManager } from './page-tasks.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -22,6 +25,19 @@ const config = {
     parseArg(process.argv, '--data-dir') ??
     process.env.READEVA_DATA_DIR ??
     path.join(repoRoot, 'data'),
+  // Docling 解析服务地址（服务端配置，客户端不接触解析服务地址与密钥）。
+  doclingUrl:
+    parseArg(process.argv, '--docling-url') ?? process.env.READEVA_DOCLING_URL ?? '',
+  doclingPollIntervalMs: Number(
+    parseArg(process.argv, '--docling-poll-interval-ms') ??
+      process.env.READEVA_DOCLING_POLL_INTERVAL_MS ??
+      500,
+  ),
+  doclingTimeoutMs: Number(
+    parseArg(process.argv, '--docling-timeout-ms') ??
+      process.env.READEVA_DOCLING_TIMEOUT_MS ??
+      300_000,
+  ),
 };
 
 if (!Number.isFinite(config.port) || config.port < 0 || config.port > 65535) {
@@ -30,6 +46,19 @@ if (!Number.isFinite(config.port) || config.port < 0 || config.port > 65535) {
 }
 
 const library = new Library(config.dataDir);
+const parseStore = new ParseStore(config.dataDir);
+const doclingAdapter = config.doclingUrl
+  ? new DoclingAdapter({
+      baseUrl: config.doclingUrl,
+      pollIntervalMs: Number.isFinite(config.doclingPollIntervalMs)
+        ? config.doclingPollIntervalMs
+        : 500,
+      timeoutMs: Number.isFinite(config.doclingTimeoutMs) ? config.doclingTimeoutMs : 300_000,
+    })
+  : null;
+const parseTasks = doclingAdapter
+  ? new ParseTaskManager({ store: parseStore, adapter: doclingAdapter, library })
+  : null;
 const app = express();
 app.disable('x-powered-by');
 
@@ -46,6 +75,11 @@ app.use('/api', express.json({ limit: '1mb' }));
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'readeva', version: APP_VERSION });
+});
+
+// 解析服务可用性（不含地址/密钥，供客户端提示「解析服务未配置」）。
+app.get('/api/parse/service', (req, res) => {
+  res.json({ configured: Boolean(doclingAdapter), engine: doclingAdapter ? 'docling' : null });
 });
 
 app.post(
@@ -125,6 +159,87 @@ app.put('/api/documents/:id/progress', async (req, res, next) => {
   }
 });
 
+/* ---------------- 页解析（Issue #3） ---------------- */
+
+function resolvePageParam(req, res) {
+  const doc = library.getDocument(req.params.id);
+  if (!doc) {
+    res.status(404).json({ error: 'document not found' });
+    return null;
+  }
+  const page = Math.floor(Number(req.params.page));
+  if (!Number.isInteger(page) || page < 1 || page > doc.pageCount) {
+    res.status(400).json({ error: `page must be an integer in [1, ${doc.pageCount}]` });
+    return null;
+  }
+  return page;
+}
+
+function parseStatusPayload(docId, page) {
+  if (parseTasks?.isRunning(docId, page)) {
+    return { page, status: 'running' };
+  }
+  const record = parseStore.getRecord(docId, page);
+  if (!record) return { page, status: 'idle' };
+  const payload = {
+    page,
+    status: record.status,
+    updatedAt: record.updatedAt,
+  };
+  if (record.status === 'succeeded') payload.parseId = record.parseId;
+  if (record.status === 'failed') payload.error = record.error;
+  return payload;
+}
+
+// 页解析请求（幂等：进行中不重复启动，已完成直接复用不重新解析）。
+app.post('/api/documents/:id/pages/:page/parse', (req, res, next) => {
+  try {
+    const page = resolvePageParam(req, res);
+    if (page === null) return;
+    if (!doclingAdapter) {
+      return res.status(503).json({ error: 'docling service not configured' });
+    }
+    const outcome = parseTasks.start(req.params.id, page);
+    if (outcome === 'reused') {
+      const payload = parseStatusPayload(req.params.id, page);
+      return res.json({ ...payload, reused: true });
+    }
+    res.status(outcome === 'started' ? 202 : 200).json({ page, status: 'running' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 任务状态：idle（未开始）/ running（已开始）/ succeeded / failed。
+app.get('/api/documents/:id/pages/:page/parse', (req, res) => {
+  const page = resolvePageParam(req, res);
+  if (page === null) return;
+  res.json(parseStatusPayload(req.params.id, page));
+});
+
+// 结果获取（仅成功后可得；按页返回解析身份、结构、文字及可用位置）。
+app.get('/api/documents/:id/pages/:page/parse/result', (req, res) => {
+  const page = resolvePageParam(req, res);
+  if (page === null) return;
+  const record = parseStore.getRecord(req.params.id, page);
+  if (!record || record.status !== 'succeeded') {
+    return res.status(404).json({ error: 'parse result not found' });
+  }
+  // 防御：无论落盘记录来自哪个版本，绝不通过接口暴露解析服务地址（审查 B1）。
+  const { serviceUrl, ...meta } = record.meta ?? {};
+  res.json({
+    parse: {
+      documentId: record.documentId,
+      page: record.page,
+      status: record.status,
+      parseId: record.parseId,
+      blocks: record.blocks,
+      meta,
+      updatedAt: record.updatedAt,
+    },
+  });
+});
+
 app.use('/api', (req, res) => {
   res.status(404).json({ error: 'not found' });
 });
@@ -147,6 +262,9 @@ const server = app.listen(config.port, config.host, () => {
   const host = addr.address === '::' ? '127.0.0.1' : addr.address;
   console.log(`Readeva service listening on http://${host}:${addr.port}`);
   console.log(`Readeva data dir: ${library.dataDir}`);
+  console.log(
+    `Readeva docling service: ${doclingAdapter ? config.doclingUrl : 'not configured'}`,
+  );
 });
 
 server.on('error', (err) => {

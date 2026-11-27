@@ -55,3 +55,16 @@ export function importPdf(file) {
 export const pdfFileUrl = (id) => `${getServiceBase()}/api/documents/${id}/file`;
 
 export const pdfjsAssetUrl = (relative) => `${getServiceBase()}/vendor/pdfjs/${relative}`;
+
+/* ---------------- 页解析（Issue #3） ---------------- */
+
+export const fetchParseService = () => request('/api/parse/service');
+
+export const fetchParseStatus = (id, page) =>
+  request(`/api/documents/${id}/pages/${page}/parse`);
+
+export const fetchParseResult = (id, page) =>
+  request(`/api/documents/${id}/pages/${page}/parse/result`);
+
+export const requestPageParse = (id, page) =>
+  request(`/api/documents/${id}/pages/${page}/parse`, { method: 'POST' });

@@ -74,8 +74,23 @@
         </div>
       </header>
       <p id="reader-error" class="status" hidden></p>
-      <div id="viewer">
-        <canvas id="pdf-canvas"></canvas>
+      <div id="reader-split">
+        <div id="viewer">
+          <canvas id="pdf-canvas"></canvas>
+        </div>
+        <aside id="parse-panel">
+          <header class="parse-panel-header">
+            <h2>结构化内容</h2>
+            <span id="parse-status" class="parse-status" data-kind="idle">未开始</span>
+          </header>
+          <p id="parse-error" class="parse-error" hidden></p>
+          <button id="parse-retry" type="button" hidden>重试解析</button>
+          <p id="parse-hint" class="parse-hint" hidden>
+            解析服务未配置：启动独立 Docling 服务并在服务端设置 READEVA_DOCLING_URL 后，
+            当前页的结构化内容会展示在这里。
+          </p>
+          <div id="parse-content" class="parse-content"></div>
+        </aside>
       </div>
     </section>
   </div>

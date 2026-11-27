@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { setTimeout as delay } from 'node:timers/promises';
 import { PDFDocument } from 'pdf-lib';
+import { readJson, writeFileAtomic } from './fs-utils.js';
 
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 5;
@@ -11,40 +11,6 @@ export class InvalidPdfError extends Error {
   constructor(message) {
     super(message);
     this.name = 'InvalidPdfError';
-  }
-}
-
-function readJson(file, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
-
-/**
- * 原子写入。Windows 上目标文件被其他句柄打开时 rename 可能抛
- * EPERM/EBUSY/EACCES，短暂重试即可恢复。
- */
-async function writeFileAtomic(file, data) {
-  const tmp = `${file}.${process.pid}.tmp`;
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      fs.writeFileSync(tmp, data);
-      fs.renameSync(tmp, file);
-      return;
-    } catch (err) {
-      if (attempt < 4 && ['EPERM', 'EBUSY', 'EACCES'].includes(err.code)) {
-        await delay(50 * (attempt + 1));
-        continue;
-      }
-      try {
-        fs.rmSync(tmp, { force: true });
-      } catch {
-        /* 清理失败可忽略 */
-      }
-      throw err;
-    }
   }
 }
 
@@ -93,6 +59,16 @@ export class Library {
 
   hasPdf(id) {
     return fs.existsSync(this.pdfPath(id));
+  }
+
+  /** 读取内容寻址副本字节流（供页解析抽取单页使用）。 */
+  readPdf(id) {
+    if (!this.hasPdf(id)) {
+      const err = new Error('document pdf missing');
+      err.status = 404;
+      throw err;
+    }
+    return fs.promises.readFile(this.pdfPath(id));
   }
 
   importPdf(buffer, name) {
