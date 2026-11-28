@@ -61,7 +61,8 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 | GET | `/api/documents/:id/pages/:page/parse` | **任务状态**：`idle`（未开始）/ `queued`（已接受、队列中）/ `running`（已开始）/ `succeeded`（含 `parseId`）/ `failed`（含 `error`） |
 | GET | `/api/documents/:id/pages/:page/parse/result` | **结果获取**：按页返回 `{ parse: { parseId, blocks, meta } }`；仅成功后可得，否则 404 |
 | PUT | `/api/documents/:id/reading-position` | **阅读页优先级更新**（Issue #5）：`{ page }` → 服务端按「当前页及后续页优先，其余降级」重排未开始任务（显式请求置顶的页不降级），返回调度后的整本进度快照；未配置解析服务时 `{ scheduled: false }` |
-| GET | `/api/documents/:id/parse/progress` | **整本解析进度**（Issue #5）：逐页状态（idle/queued/running/succeeded/failed + `queuePosition` + 失败原因）+ 计数（succeeded/failed/running/queued/idle、total）；基于轻量状态索引构建（B1：不逐轮读盘解析内容块），服务重启后进度不丢 |
+| GET | `/api/documents/:id/parse/progress` | **整本解析进度**（Issue #5）：逐页状态（idle/queued/running/succeeded/failed + `queuePosition` + 失败原因）+ 计数（succeeded/failed/running/queued/idle、total）；基于轻量状态索引构建（B1：不逐轮读盘解析内容块），服务重启后进度不丢。**进度轮询同时作为客户端会话心跳**（Issue #6） |
+| GET | `/api/documents/:id/session` | **客户端会话状态**（Issue #6）：`{ documentId, supported, lastSeen, graceMs, expired }`；**只读观察端点，不刷新 lastSeen**（测试/诊断用）；未配置解析服务时 `{ supported: false }` |
 
 错误返回 `{ error }`；非 PDF 导入返回 400；未知文档返回 404；非法页码返回 400。
 
@@ -95,7 +96,22 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 - **双向交互**：悬浮右侧内容块 ↔ 悬浮原页覆盖框互相高亮（`.hot`）；点击右侧块 → 原页滚动定位到对应区域，点击覆盖框 → 右侧滚动定位到对应块（`.active` 选中态独占）。
 - **失败语义**：位置不可用（`bbox: null` 或无效坐标，如零尺寸/出页）的内容块照常展示、无覆盖框；悬浮静默（无框可亮即无操作）；主动定位失败给 `#locate-toast` 短提示（约 3s 自动消失），均不报错、不打断阅读。
 
+## 客户端会话、宽限期与重连恢复（Issue #6）
+
+客户端是浏览器应用，由 Readeva 服务静态托管；**关闭浏览器不影响服务进程**——服务独立推进队列。本任务为「客户端退出/失联」补齐生命周期语义：
+
+- **会话存续（心跳）**：客户端任何文档活动都刷新该文档的 `lastSeen`——阅读位置上报（`PUT reading-position`）、整本进度轮询（`GET parse/progress`，客户端阅读视图内 8s 慢刷新）、单页状态轮询、解析请求/结果获取、阅读位置保存等；服务端不区分「心跳」与业务请求，活动即活跳。会话按文档跟踪（队列也按文档隔离），切换文档后旧文档进入宽限期倒计时。
+- **宽限期**：`--client-grace-ms` / `READEVA_CLIENT_GRACE_MS`，默认 60000ms。**必须大于客户端心跳间隔**（阅读视图内慢刷新 8s）以避免正常阅读被误判退出；默认 60s 为 7.5 倍余量。非法值/0 回落默认。
+- **到期处置（幂等）**：周期性会话检查（250ms）发现文档超宽限期无活动即处置：**运行中的页不取消、继续跑完并落盘**（运行中页与队列清除无关）；**尚未开始的任务（队列/置顶标记）清除**，不派发；扫全会话与开局填充额度一并结束。处置幂等：重连/多次到期不误伤——已完成页保留、清除的页保持清除、零新增派发。
+- **竞态收口**：派发路径（`takeNext`）在会话已超宽限期但周期检查尚未执行时立即处置并跳过该文档，消除「运行中页完成 → pump 派发下一页」与「到期清除」之间的竞态窗口；客户端在宽限期内的任何活动都会刷新 lastSeen 使到期不生效（宽限内回来队列不受影响）。
+- **重连**：客户端重新打开文档（`showReader` 重新上报阅读位置）→ 服务端按当前阅读位置重新调度未完成页（复用 #5 的重排规则），已完成页从持久化取回、不重新解析；客户端既有的「无 queued/running 且仍有 idle 页」自愈逻辑同样可在会话恢复后重建队列。
+- **执行路径归口项（本任务收口）**：
+  - **按页抽取缓存**（`server/docling.js` 的 `PageExtractor`）：整本 PDF 只 `readPdf` + `PDFDocument.load` 一次并按文档缓存，页间复用（原实现每页全量加载整本 PDF）；文档不再有排队/运行中任务（含宽限期到期后运行中页全部完成）时释放缓存回收内存。与「断开后继续跑完已开始页」叠加：运行中的页在客户端退出后仍可完成，因整本只解析一次。
+  - **图片 base64 体积评估**：Docling 内嵌图片以 data URI 落在页记录里，单页约近 1MB。评估结论：**保持现有对外契约与落盘格式**（`blocks[].image.uri` 为 data URI，接口与持久化格式不变）——单用户本地书库场景下 215 页 × 1MB ≈ 215MB/本（仅含图片页）可接受，且改造（转文件引用/压缩）会改变 #3 已锁定的接口契约与 B1 规模回归的记录形态，收益与风险不成比例；若未来远程部署成为瓶颈，可另立 Issue 评估「图片资源去重（跨页内容寻址）+ 文件引用」迁移，届时在 PR 中说明格式变更。
+  - **跨文档取任务轮转（round-robin）**（`server/page-tasks.js` 的 `takeNext`/`setQueue`）：取走某文档队首后把该文档移到轮转尾部，下一次取任务从下一份文档开始——并发下不单个文档排空；新队列（新打开/重连的文档）插入轮转队首，优先获得派发轮次，已有队列的文档保持位置（翻页上报不反复插队饿死其他文档）。
+  - **状态缓存随文档清理**：`ParseStore.pruneStatusCache` 在会话周期检查时剔除已不在书库中的文档缓存条目（statusCache/indexCache/lastSeen），与文档删除能力联动（删除未实现时保证缓存不无界增长）。
+  - **冷启动状态索引（index.json）**：每文档 `parses/<sha>/index.json` 保存状态字段（status/parseId/error/updatedAt）+ 页文件 mtime/size 快照，保存路径按文档串行链增量更新（避免并发读-改-写丢条目）；`getStatus` 冷启动（内存缓存空）时先经索引取状态，**消除重启后首轮逐页读全量记录**（原 B1 首轮成本）；索引缺失/损坏（如测试直接落盘页记录）或条目与页文件 stat 不匹配（页文件被外部改动/删除）时回退逐页读盘，**正确性不依赖索引**（索引只是加速器）。
+
 ## 后续扩展边界（本任务不实现）
 
-- **客户端退出宽限期与重连重新调度（Issue #6）**：客户端退出/连接失效后完成已开始页并清除未开始排队、重连取回结果并重新调度；调度与持久化基础已在本任务就位。
 - **查词翻译、成果包导入导出**：译文将绑定「文档 + 页解析身份（parseId）」；成果包可从 `parses/` + `progress/` + 文档身份组成一致快照。

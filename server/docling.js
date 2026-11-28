@@ -379,3 +379,68 @@ export async function extractPage(pdfBytes, pageNo) {
     throw new DoclingServiceError(`page extraction failed: ${err.message}`);
   }
 }
+
+/**
+ * 按页抽取器（Issue #6 执行路径归口）：整本 PDF 只解析一次并按文档缓存，页间复用。
+ *
+ * 原实现每页都 `readPdf` 全量读盘 + `PDFDocument.load` 整本解析，与「客户端退出后
+ * 运行中的页继续跑完」叠加时浪费严重；缓存后同一文档的多页任务共享一次解析，
+ * 文档不再有排队/运行中任务时由调度器 `release` 回收内存。
+ */
+export class PageExtractor {
+  constructor({ library }) {
+    this.library = library;
+    /** docId -> Promise<PDFDocument>：整本 PDF 只解析一次，跨页复用。 */
+    this.documents = new Map();
+  }
+
+  /** 取文档的解析后 PDFDocument（整本只解析一次；加载失败不缓存拒绝态）。 */
+  getDocument(docId) {
+    const cached = this.documents.get(docId);
+    if (cached) {
+      return cached.catch((err) => {
+        this.documents.delete(docId);
+        throw err;
+      });
+    }
+    const loading = (async () => {
+      if (!this.library.hasPdf(docId)) {
+        throw new DoclingServiceError('document pdf missing');
+      }
+      const pdfBytes = await this.library.readPdf(docId);
+      try {
+        return await PDFDocument.load(pdfBytes, {
+          ignoreEncryption: true,
+          updateMetadata: false,
+        });
+      } catch (err) {
+        throw new DoclingServiceError(`page extraction failed: ${err.message}`);
+      }
+    })().catch((err) => {
+      this.documents.delete(docId);
+      throw err;
+    });
+    this.documents.set(docId, loading);
+    return loading;
+  }
+
+  /** 抽取单页字节流（固定元数据保证字节确定）；同一文档整本只解析一次。 */
+  async extractPage(docId, pageNo) {
+    const source = await this.getDocument(docId);
+    const pageCount = source.getPageCount();
+    if (!Number.isInteger(pageNo) || pageNo < 1 || pageNo > pageCount) {
+      throw new DoclingServiceError(`page ${pageNo} out of range (1..${pageCount})`);
+    }
+    const single = await PDFDocument.create();
+    single.setCreationDate(new Date(0));
+    single.setModificationDate(new Date(0));
+    const [copied] = await single.copyPages(source, [pageNo - 1]);
+    single.addPage(copied);
+    return { bytes: await single.save(), pageCount };
+  }
+
+  /** 释放文档缓存（队列排空 / 会话到期时调用，回收内存）。 */
+  release(docId) {
+    this.documents.delete(docId);
+  }
+}

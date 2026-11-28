@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { DoclingServiceError, extractPage } from './docling.js';
+import { DoclingServiceError, PageExtractor } from './docling.js';
 
 /**
  * 页解析任务编排与调度：
@@ -17,9 +17,18 @@ import { DoclingServiceError, extractPage } from './docling.js';
  * - 队列按序补全其余未解析页（闲置补全）；失败页仅通过显式请求重试；
  * - 全局并发上限可配置（默认 2，与 docling_service 线程池对齐）；背景派发 pacing
  *   动态自适应设备性能（最近 N 页转换耗时 × 系数，钳制上限），可用固定间隔覆盖。
+ *
+ * 客户端会话与宽限期（Issue #6）：
+ * - 客户端任何文档活动（阅读位置上报/进度轮询/状态轮询/解析请求等）刷新 lastSeen；
+ * - 超过宽限期（READEVA_CLIENT_GRACE_MS / --client-grace-ms，默认 60s）无活动视为
+ *   客户端退出：完成已开始页（running 不取消、继续跑完并落盘）、清除尚未开始的任务
+ *   （队列/置顶标记），处置幂等（重连/多次到期不误伤）；
+ * - 重连（重新上报阅读位置）按当前阅读位置重新调度未完成页（复用本文件的重排规则），
+ *   已完成页复用持久化结果不重新解析；宽限内回来队列不受影响；
+ * - 跨文档取任务轮转（round-robin）：并发下不单个文档排空。
  */
 export class ParseTaskManager {
-  constructor({ store, adapter, library, concurrency = 2, sweepDelayMs = 0, sweepPacingFactor = 0.5 }) {
+  constructor({ store, adapter, library, concurrency = 2, sweepDelayMs = 0, sweepPacingFactor = 0.5, clientGraceMs = 60000 }) {
     this.store = store;
     this.adapter = adapter;
     this.library = library;
@@ -35,6 +44,12 @@ export class ParseTaskManager {
     // 动态 pacing 系数：背景派发间隔 = 最近转换耗时估计 × 系数。设备快→间隔小
     // 吞吐高；设备慢→间隔大、留 CPU 给阅读交互。系数 >0.5 时并发 2 下会出现 CPU 空隙。
     this.sweepPacingFactor = Number.isFinite(factor) && factor > 0 ? factor : 0.5;
+    // 客户端会话宽限期（毫秒）：超过该时长无客户端活动即视为退出（Issue #6）。
+    // 默认 60s，必须大于客户端心跳间隔（阅读视图内整本进度慢刷新 8s）以避免误判。
+    const grace = Number(clientGraceMs);
+    this.clientGraceMs = Number.isFinite(grace) && grace > 0 ? Math.floor(grace) : 60000;
+    // 按页抽取器：整本 PDF 只解析一次并缓存（避免每页全量加载，执行路径归口）。
+    this.extractor = new PageExtractor({ library });
     // 背景派发间隔钳制上限（避免慢页估计把间隔拉到数秒以上）。
     this.MAX_SWEEP_INTERVAL_MS = 5000;
     // 最近转换耗时样本（派发→succeeded/failed，不含排队等待），滚动估计用。
@@ -54,6 +69,11 @@ export class ParseTaskManager {
     this.queues = new Map();
     /** docId -> Set<page>，显式解析请求/重试的置顶标记：阅读位置重排不会降级置顶页。 */
     this.pinned = new Map();
+    /** docId -> 最近客户端活动时间戳（会话存续，Issue #6）。 */
+    this.lastSeen = new Map();
+    // 周期性会话检查：超出宽限期的文档执行到期处置（完成已开始页、清除未开始队列）。
+    this.sessionSweepTimer = setInterval(() => this.sessionSweep(), 250);
+    if (typeof this.sessionSweepTimer.unref === 'function') this.sessionSweepTimer.unref();
   }
 
   /* ---------------- 单页状态 ---------------- */
@@ -88,6 +108,64 @@ export class ParseTaskManager {
     return 'idle';
   }
 
+  /* ---------------- 客户端会话与宽限期（Issue #6） ---------------- */
+
+  /** 客户端活动（阅读位置上报/进度轮询/状态轮询/解析请求等）→ 刷新会话最近活跃时间。 */
+  touch(docId) {
+    this.lastSeen.set(docId, Date.now());
+  }
+
+  /** 最近一次客户端活动时间；从未活动返回 null。 */
+  lastSeenAt(docId) {
+    return this.lastSeen.get(docId) ?? null;
+  }
+
+  /** 会话是否已过期（超过宽限期无客户端活动）。 */
+  isExpired(docId) {
+    const seen = this.lastSeen.get(docId);
+    return seen !== undefined && Date.now() - seen > this.clientGraceMs;
+  }
+
+  /** 会话状态（只读观察端点用；不刷新 lastSeen）。 */
+  sessionInfo(docId) {
+    const seen = this.lastSeen.get(docId);
+    return {
+      documentId: docId,
+      supported: true,
+      lastSeen: seen ?? null,
+      graceMs: this.clientGraceMs,
+      expired: seen !== undefined && Date.now() - seen > this.clientGraceMs,
+    };
+  }
+
+  /**
+   * 宽限期到期处置（幂等，重连/多次到期不误伤）：完成已开始页（running 不取消、
+   * 继续跑完并落盘），清除尚未开始的任务（队列/置顶标记），结束扫全会话；
+   * 无运行中任务时释放整本 PDF 缓存。
+   */
+  expireDoc(docId) {
+    this.queues.delete(docId);
+    this.pinned.delete(docId);
+    this.sweepSessions.delete(docId);
+    this.openingBurst.delete(docId);
+    if (!this.running.has(docId)) this.extractor.release(docId);
+  }
+
+  /** 周期性会话检查：超宽限期未活动的文档执行到期处置；状态缓存随书库清理。 */
+  sessionSweep() {
+    const now = Date.now();
+    for (const docId of [...this.lastSeen.keys()]) {
+      if (now - this.lastSeen.get(docId) > this.clientGraceMs) this.expireDoc(docId);
+    }
+    // statusCache / indexCache / lastSeen 随文档清理（与删除能力联动；删除未实现时
+    // 保证缓存不无界增长）。书库清单取自内存态 documents（不逐轮读盘）。
+    const valid = new Set(Object.keys(this.library.documents));
+    this.store.pruneStatusCache(valid);
+    for (const docId of [...this.lastSeen.keys()]) {
+      if (!valid.has(docId)) this.lastSeen.delete(docId);
+    }
+  }
+
   /* ---------------- 调度入口 ---------------- */
 
   /**
@@ -100,6 +178,8 @@ export class ParseTaskManager {
   updateReadingPosition(docId, page) {
     const doc = this.library.getDocument(docId);
     if (!doc) throw new DoclingServiceError('document not found');
+    // 阅读位置上报 = 客户端活动（会话存续，Issue #6）。
+    this.touch(docId);
     const order = [];
     for (let p = page; p <= doc.pageCount; p += 1) order.push(p);
     for (let p = 1; p < page; p += 1) order.push(p);
@@ -115,7 +195,7 @@ export class ParseTaskManager {
     for (const p of pinned) {
       if (this.store.getStatus(docId, p)) this.pinned.get(docId)?.delete(p);
     }
-    this.queues.set(docId, queue);
+    this.setQueue(docId, queue);
     // 扫全会话管理：文档首次上报（无进行中会话）授予开局填充额度——立即填满
     // 所有并发槽，不做 pacing；pacing 只作用于后续背景派发。
     if (!this.sweepSessions.has(docId)) {
@@ -132,6 +212,8 @@ export class ParseTaskManager {
    * 返回 'started' | 'running' | 'reused'；并发占满时任务排队（响应 202 queued）。
    */
   start(docId, page) {
+    // 显式解析请求/重试 = 客户端活动（会话存续，Issue #6）。
+    this.touch(docId);
     const current = this.status(docId, page);
     if (current === 'running') return 'running';
     if (typeof current === 'object' && current.status === 'succeeded') return 'reused';
@@ -146,7 +228,7 @@ export class ParseTaskManager {
     let queue = this.queues.get(docId);
     if (!queue) {
       queue = [];
-      this.queues.set(docId, queue);
+      this.setQueue(docId, queue);
     } else {
       const index = queue.indexOf(page);
       if (index >= 0) queue.splice(index, 1);
@@ -230,9 +312,21 @@ export class ParseTaskManager {
    * 取下一个待解析页：跳过失效条目（已成功/已在运行的陈旧队列项），返回队首
    * 待办页及其置顶状态；**不移出队列、不消耗置顶标记**（由 claimNext 在实际
    * 派发时完成，节流等待期间任务保留在队首）。无可派发任务返回 null。
+   *
+   * 跨文档取任务轮转（Issue #6）：取走某文档队首后把该文档移到队列轮转尾部，
+   * 下一次取任务从下一份文档开始——并发下不单个文档排空（多文档公平派发）。
    */
   takeNext() {
-    for (const [docId, queue] of this.queues) {
+    while (this.queues.size > 0) {
+      const first = this.queues.entries().next().value;
+      if (!first) return null;
+      const [docId, queue] = first;
+      // 宽限期已过（会话到期）但周期性 sweep 尚未执行时立即处置并跳过该文档：
+      // 消除「运行中页完成 → pump 派发下一页」与「到期清除」之间的竞态窗口。
+      if (this.isExpired(docId)) {
+        this.expireDoc(docId);
+        continue;
+      }
       while (queue.length > 0) {
         const page = queue[0];
         const status = this.store.getStatus(docId, page);
@@ -242,11 +336,29 @@ export class ParseTaskManager {
           this.pinned.get(docId)?.delete(page);
           continue;
         }
+        // 轮转：取走本文档队首后把文档移到队尾（下一轮从别的文档开始）；
+        // 队列已空则直接删除（不残留空队列）。
+        this.queues.delete(docId);
+        if (queue.length > 0) this.queues.set(docId, queue);
         return { docId, page, pinned: this.pinned.get(docId)?.has(page) ?? false };
       }
       this.queues.delete(docId);
     }
     return null;
+  }
+
+  /**
+   * 写入文档队列。新队列（文档此前无队列：新打开/重连）插入轮转队首——下一派发
+   * 轮次优先轮转新文档；已有队列的文档保持当前轮转位置（翻页上报不反复插队饿死
+   * 其他文档）。
+   */
+  setQueue(docId, queue) {
+    const existed = this.queues.has(docId);
+    this.queues.set(docId, queue);
+    if (!existed) {
+      this.queues.delete(docId);
+      this.queues = new Map([[docId, queue], ...this.queues]);
+    }
   }
 
   /** 实际派发前从队列移除该页并消耗置顶标记。 */
@@ -286,10 +398,12 @@ export class ParseTaskManager {
           this.dispatchTimes.delete(durationKey);
           this.recordConversionDuration(Date.now() - started);
         }
-        // 扫全会话结束（队列空且无运行中任务）：下次上报重新授予开局填充。
+        // 扫全会话结束（队列空且无运行中任务）：下次上报重新授予开局填充；
+        // 同时释放整本 PDF 缓存（执行路径归口：避免文档长时间驻留内存）。
         if (!this.queues.get(docId)?.length && !this.running.has(docId)) {
           this.sweepSessions.delete(docId);
           this.openingBurst.delete(docId);
+          this.extractor.release(docId);
         }
         // 任务结束（成功或失败）后继续派发队列下一页：失败不阻塞队列。
         this.pump();
@@ -302,10 +416,10 @@ export class ParseTaskManager {
   async run(docId, page, requestedAt) {
     const doc = this.library.getDocument(docId);
     if (!doc) throw new DoclingServiceError('document not found');
-    if (!this.library.hasPdf(docId)) throw new DoclingServiceError('document pdf missing');
 
-    const pdfBytes = await this.library.readPdf(docId);
-    const { bytes: pageBytes } = await extractPage(pdfBytes, page);
+    // 整本 PDF 只解析一次并缓存（PageExtractor）：避免每页全量加载整本 PDF，
+    // 与「客户端退出后运行中的页继续跑完」叠加；队列清除不影响已开始任务。
+    const { bytes: pageBytes } = await this.extractor.extractPage(docId, page);
     const result = await this.adapter.parsePage(pageBytes, {
       filename: `page-${page}.pdf`,
       pageNo: page,
