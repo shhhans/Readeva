@@ -75,7 +75,7 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 - **队列成员**：仅收未开始（无落盘记录且未运行）的页；已完成页从队列摘除、复用结果；**失败页不入自动队列、不自动重试**——标记失败、不阻塞队列，仅通过显式解析请求（`POST …/parse`）重试，成功后由 `saveResult` 替换失败记录。用户视角：整本补全会停在「解析 x/y · 失败 n」（面板头部静态文本），失败页保持可见可重试。
 - **派发**：全局并发上限可配置（`--parse-concurrency` / `READEVA_PARSE_CONCURRENCY`，默认 2，与 docling_service 线程池 `max_workers=2` 对齐——同进程共享已加载模型，内存不翻倍、CPU 翻倍；跨文档共享；本机 2GB pagefile 下 2 是稳妥上限）；任务结束（成功或失败）后继续派发队列下一页——队列按序补全其余未解析页（闲置补全）。跳页插队为 staggered 语义：新页插入队首，任一并发槽释放即开始，不做「保留空槽」，平均跳页等待约为串行的一半。
 - **开局填充**：每次扫全会话（文档打开/首次阅读位置上报）立即填满所有并发槽（并发 2 → 两页同时开始，不做 pacing）；pacing 只作用于后续背景派发。会话在队列排空且无运行中任务时结束，下次上报重新授予。
-- **动态 pacing（默认）**：连续背景派发之间的间隔 = 最近 3 页转换耗时（派发→succeeded/failed，不含排队）均值 × `--parse-sweep-pacing-factor` / `READEVA_PARSE_SWEEP_PACING_FACTOR`（默认 0.5），钳制 [0, 5000]ms——设备快→间隔小吞吐高，设备慢→间隔大留 CPU 给阅读交互（系数 >0.5 时并发 2 下出现 CPU 空隙）。
+- **动态 pacing（默认）**：连续背景派发之间的间隔 = 最近 3 页转换耗时（派发→succeeded/failed，不含排队）均值 × `--parse-sweep-pacing-factor` / `READEVA_PARSE_SWEEP_PACING_FACTOR`（默认 0.5），钳制 [0, 5000]ms——设备快→间隔小吞吐高，设备慢→间隔大留 CPU 给阅读交互（系数 >0.5 时并发 2 下出现 CPU 空隙）。**代价与边界**：pacing 默认开启，稳态整本补全吞吐低于「不节流」（单页耗时 T 时约 1.5T/页）；**当前页（非 pinned）同样受 pacing 约束**，翻页后最多可能等待一个 pacing 间隔（上限 5s）；系数传 0/非法值会回落默认 0.5（当前无「完全关闭」档，需固定节流时用 `READEVA_PARSE_SWEEP_DELAY_MS`）。pacing 状态目前是服务级全局（`sweepTimer`/`lastSweepDispatchAt`/耗时样本），队列则按文档隔离——多文档并行时耗时样本互相污染，待后续按 docId 分桶。
 - **固定节流覆盖（可选）**：`--parse-sweep-delay-ms` / `READEVA_PARSE_SWEEP_DELAY_MS` 设 >0 时以固定间隔覆盖动态 pacing。显式请求/置顶页在两种模式下均不受限（等待期间任务留在队首、不占并发槽）。
 - **显式请求插队**：`POST …/pages/:page/parse` 将目标页置于队首并标记置顶（pinned）：随后的阅读位置重排不会把显式请求/重试的页降级；页离开队列（开始执行或复用跳过）即消耗置顶标记。
 - **进度查询**：`GET /api/documents/:id/parse/progress` 返回逐页状态（含队列位置与失败原因）与计数（succeeded/total + failed/running/queued/idle）；已完成/失败页以落盘记录的轻量状态索引为准，服务重启后进度不丢。
