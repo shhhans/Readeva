@@ -60,6 +60,75 @@ const CSV_COLUMNS = [
 ];
 
 /**
+ * ECDICT CSV 的必需表头列（构建实际使用的列；detail/audio 只读取不使用）。
+ */
+const REQUIRED_COLUMNS = [
+  'word',
+  'phonetic',
+  'definition',
+  'translation',
+  'pos',
+  'collins',
+  'oxford',
+  'tag',
+  'bnc',
+  'frq',
+  'exchange',
+];
+
+/**
+ * 词条数下限：解析出的词条明显少于该值时，判定「下载到了错误文件」
+ * （HTML 错误页 / 截断文件 / 代理返回的占位内容），构建直接失败，
+ * 避免产出空词典或残缺词典。
+ *
+ * 可调：命令行 `--min-entries N` 或环境变量 `READEVA_DICT_MIN_ENTRIES`。
+ * 正式 ECDICT 词条约 34 万条，1000 是很宽松的下限（只挡明显异常）。
+ */
+export const DEFAULT_MIN_ENTRIES = 1000;
+
+/**
+ * 嗅探「下载到的不是 ECDICT 词条表」：HTML/XML 错误页、Git LFS 指针。
+ * 命中即抛错，并给出可操作的提示。
+ */
+export function assertCsvIsDictionary({ text, fileName }) {
+  const head = text.slice(0, 1024).trimStart().toLowerCase();
+  if (head.startsWith('<!doctype html') || head.startsWith('<html') || head.startsWith('<?xml')) {
+    throw new Error(
+      `dictionary csv is not a CSV file: ${fileName} looks like an HTML/XML page ` +
+      '(downloaded an error page instead of ecdict.csv) — please re-download ' +
+      'https://raw.githubusercontent.com/skywind3000/ECDICT/master/ecdict.csv',
+    );
+  }
+  if (head.startsWith('version https://git-lfs.github.com/spec')) {
+    throw new Error(
+      `dictionary csv is a Git LFS pointer, not the dictionary data: ${fileName} — ` +
+      "please download the raw file (git lfs pull or the raw.githubusercontent.com URL)",
+    );
+  }
+}
+
+/**
+ * 表头校验：必需列齐全 + 列数与预期一致。
+ * 列数不符通常意味着拿到的不是 ECDICT 词条表（表头被截断或换了文件）。
+ */
+export function assertCsvHeader(header) {
+  const missing = REQUIRED_COLUMNS.filter((col) => !header.includes(col));
+  if (missing.length > 0) {
+    throw new Error(
+      `unexpected csv header: missing column(s) ${missing.join(',')} ` +
+      `(expected first row with '${CSV_COLUMNS.join(',')}', got ${header.slice(0, 5).join(',')})`,
+    );
+  }
+  if (header.length !== CSV_COLUMNS.length) {
+    throw new Error(
+      `unexpected csv header: expected ${CSV_COLUMNS.length} columns ` +
+      `('${CSV_COLUMNS.join(',')}'), got ${header.length} ('${header.join(',')}') — ` +
+      'if upstream added a column, update CSV_COLUMNS in this script',
+    );
+  }
+}
+
+/**
  * 解析一段 CSV 文本为行数组。RFC4180 规则：
  * 双引号包裹的字段可包含逗号/换行（"" 转义引号）；ECDICT 用引号包裹
  * 含逗号的字段，换行以字面 “\n” 两个字符表示（本函数原样保留，由
@@ -153,6 +222,8 @@ function rowToEntry(row) {
 
 /**
  * 从 ECDICT 的 ecdict.csv 构建本地查询数据：
+ * - 构建前校验 CSV（表头列数/必需列 + 词条数下限），避免「下载到错误文件」
+ *   （HTML 错误页/截断文件）时静默产出空词典；
  * - 小写键去重（同键保留首个出现的词条，统计为 duplicates）；
  * - 按小写键的 UTF-8 字节序排序，写入 `ecdict.entries.jsonl`（每行一个词条
  *   JSON）并记录每条的文件偏移；
@@ -161,32 +232,41 @@ function rowToEntry(row) {
  *
  * 全部产物先写入临时目录、整体就绪后原子换入 outDir，中断不会留下半成品。
  */
-export async function buildDictionary({ csvPath, outDir, sourceUrl }) {
+export async function buildDictionary({
+  csvPath,
+  outDir,
+  sourceUrl,
+  minEntries = DEFAULT_MIN_ENTRIES,
+}) {
   csvPath = path.resolve(csvPath);
   outDir = path.resolve(outDir ?? path.join(repoRoot, 'data', 'dict', 'ecdict'));
   sourceUrl = sourceUrl ?? 'https://github.com/skywind3000/ECDICT（ecdict.csv）';
+  minEntries =
+    Number.isFinite(minEntries) && minEntries >= 0 ? Math.floor(minEntries) : DEFAULT_MIN_ENTRIES;
 
   const csvBytes = fs.readFileSync(csvPath);
   const text = csvBytes.toString('utf8');
   // 兼容个别发行版可能带有的 UTF-8 BOM。
-  const rows = parseCsvRows(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 
+  // (1) 下载到错误文件的最常见形态：HTML 错误页 / Git LFS 指针。
+  assertCsvIsDictionary({ text: body, fileName: path.basename(csvPath) });
+
+  const rows = parseCsvRows(body);
   if (rows.length === 0) {
     throw new Error('dictionary csv is empty');
   }
+  // (2) 表头校验：必需列齐全 + 列数与预期一致。
   const header = rows[0].map((c) => c.trim().toLowerCase());
-  const hasHeader = header[0] === 'word' && header.includes('translation');
-  if (!hasHeader) {
-    throw new Error(
-      `unexpected csv header: expected first row with 'word,phonetic,...,translation,...', got ${header.slice(0, 5).join(',')}`,
-    );
-  }
+  assertCsvHeader(header);
   const dataRows = rows.slice(1);
 
   const entries = new Map(); // key → entry（保留首次出现）
   let duplicates = 0;
   let skipped = 0;
+  let malformedRows = 0; // 字段数与表头不一致的行（截断/拼接错误时出现）
   for (const row of dataRows) {
+    if (row.length !== header.length) malformedRows += 1;
     const entry = rowToEntry(row);
     if (!entry) {
       skipped += 1;
@@ -202,6 +282,22 @@ export async function buildDictionary({ csvPath, outDir, sourceUrl }) {
       continue;
     }
     entries.set(key, entry);
+  }
+
+  // (3) 词条数下限：明显异常（HTML 错误页/截断下载）直接失败，不产出空词典。
+  if (entries.size < minEntries) {
+    throw new Error(
+      `dictionary csv looks wrong: only ${entries.size} entries parsed ` +
+      `(expected at least ${minEntries}) — the downloaded file is probably an HTML error page ` +
+      'or a truncated download; please re-download ecdict.csv and retry',
+    );
+  }
+
+  const warnings = [];
+  if (malformedRows > 0) {
+    warnings.push(
+      `${malformedRows}/${dataRows.length} data rows have a different column count than the header`,
+    );
   }
 
   const keys = [...entries.keys()];
@@ -248,6 +344,12 @@ export async function buildDictionary({ csvPath, outDir, sourceUrl }) {
     entryCount: keys.length,
     duplicateKeys: duplicates,
     license: ECDICT_LICENSE,
+    validation: {
+      minEntries,
+      dataRows: dataRows.length,
+      malformedRows,
+      columns: CSV_COLUMNS,
+    },
   };
   fs.writeFileSync(path.join(staging, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 
@@ -273,6 +375,9 @@ export async function buildDictionary({ csvPath, outDir, sourceUrl }) {
     entryCount: keys.length,
     duplicates,
     skipped,
+    malformedRows,
+    minEntries,
+    warnings,
     files: {
       'ecdict.entries.jsonl': fs.statSync(path.join(outDir, 'ecdict.entries.jsonl')).size,
       'ecdict.words.bin': fs.statSync(path.join(outDir, 'ecdict.words.bin')).size,
@@ -292,18 +397,30 @@ function parseArg(argv, flag) {
 export async function main(argv) {
   const csvPath = parseArg(argv, '--csv');
   if (!csvPath) {
-    console.error('用法: node scripts/build-dictionary.mjs --csv <ecdict.csv 路径> [--out <输出目录>]');
+    console.error('用法: node scripts/build-dictionary.mjs --csv <ecdict.csv 路径> [--out <输出目录>] [--min-entries <下限>]');
     console.error('  --csv  下载好的 ecdict.csv（ECDICT 仓库 master 分支，约 63MB）');
     console.error('  --out  输出目录（默认 <项目目录>\\data\\dict\\ecdict，服务默认从此读取）');
+    console.error(
+      `  --min-entries  词条数下限（默认 ${DEFAULT_MIN_ENTRIES}，也可用 READEVA_DICT_MIN_ENTRIES）：` +
+        '解析出的词条少于该值时直接失败（下载到错误文件/截断文件）',
+    );
     return 1;
   }
   const outDir = parseArg(argv, '--out');
+  const minEntriesFlag = parseArg(argv, '--min-entries');
+  const minEntries =
+    minEntriesFlag !== undefined
+      ? Number(minEntriesFlag)
+      : Number(process.env.READEVA_DICT_MIN_ENTRIES ?? DEFAULT_MIN_ENTRIES);
   try {
-    const summary = await buildDictionary({ csvPath, outDir });
+    const summary = await buildDictionary({ csvPath, outDir, minEntries });
     console.log(`词典构建完成：${summary.entryCount} 条词条（去重 ${summary.duplicates}，跳过 ${summary.skipped}）`);
     console.log(`输出目录: ${summary.outDir}`);
     for (const [file, bytes] of Object.entries(summary.files)) {
       console.log(`  ${file}: ${(bytes / 1024 / 1024).toFixed(1)} MB`);
+    }
+    for (const warning of summary.warnings) {
+      console.warn(`警告: ${warning}`);
     }
     console.log('重启 Readeva 服务后即可离线查词（无需其他配置）。');
     return 0;

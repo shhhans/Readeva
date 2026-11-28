@@ -88,7 +88,8 @@ export const fetchParseProgress = (id) => request(`/api/documents/${id}/parse/pr
 /* ---------------- 选词查词：ECDICT 离线词典（Issue #7） ---------------- */
 
 /**
- * 词条查询：命中返回 { entry }；未收录 404；词典数据未准备 503。
+ * 词条查询：命中返回 { entry, license, dataSources }（归因信息来自构建产物
+ * manifest，可能为 null）；未收录 404（含超长查询）；词典数据未准备 503。
  * 错误对象携带 status 属性供界面区分提示。
  */
 export async function fetchDictionaryLookup(word) {

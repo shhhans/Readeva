@@ -5,7 +5,7 @@ import { Library, InvalidPdfError } from './library.js';
 import { DoclingAdapter } from './docling.js';
 import { ParseStore } from './parse-store.js';
 import { ParseTaskManager, buildParseProgress } from './page-tasks.js';
-import { DictionaryStore, DictionaryNotPreparedError, normalizeLookupKey } from './dictionary.js';
+import { DictionaryStore, DictionaryNotPreparedError, normalizeLookupKey, MAX_LOOKUP_LENGTH } from './dictionary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -363,13 +363,18 @@ app.get('/api/documents/:id/parse/progress', (req, res) => {
 
 const dictionaryStore = new DictionaryStore(config.ecdictDir);
 
-// 词条查询：200 { entry } / 404 未收录 / 503 词典数据未准备 / 400 非法参数。
+// 词条查询：200 { entry, license, dataSources } / 404 未收录（含超长查询）/
+// 503 词典数据未准备 / 400 非法参数（缺 word / 仅空白）。
 // 纯本地查询（内存索引 + 文件切片），不访问网络；首版不维护查词历史。
 app.get('/api/dictionary/lookup', async (req, res, next) => {
   try {
     const key = normalizeLookupKey(req.query.word);
     if (!key) {
       return res.status(400).json({ error: 'word query parameter is required' });
+    }
+    // 超长查询与「未收录」同一语义：整段选文必然不在词典里，报非法参数没有意义。
+    if (key.length > MAX_LOOKUP_LENGTH) {
+      return res.status(404).json({ error: 'entry not found' });
     }
     let entry;
     try {
@@ -381,7 +386,13 @@ app.get('/api/dictionary/lookup', async (req, res, next) => {
       throw err;
     }
     if (!entry) return res.status(404).json({ error: 'entry not found' });
-    res.json({ entry });
+    // 归因（许可 + 上游数据来源）：来自构建产物 manifest，缺字段时用内嵌常量。
+    const attribution = dictionaryStore.getAttribution();
+    res.json({
+      entry,
+      license: attribution?.license ?? null,
+      dataSources: attribution?.dataSources ?? null,
+    });
   } catch (err) {
     next(err);
   }

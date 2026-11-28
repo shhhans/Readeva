@@ -550,6 +550,16 @@ dialog h2 { font-size: 16px; margin: 0 0 14px; }
   color: var(--muted);
 }
 
+/* 真实归因：许可行 + 上游数据来源行（长文本换行展示）。 */
+.dict-card-footer .dict-attribution-main,
+.dict-card-footer .dict-attribution-sources {
+  display: block;
+}
+
+.dict-card-footer .dict-attribution-sources {
+  margin-top: 2px;
+}
+
 dialog h2 { font-size: 16px; margin: 0 0 14px; }
 
 dialog label { display: block; margin-bottom: 10px; }

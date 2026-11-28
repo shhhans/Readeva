@@ -333,6 +333,7 @@ state.wordLookup = new WordLookup({
     definition: $('#dict-definition'),
     definitionText: $('#dict-definition-text'),
     meta: $('#dict-meta'),
+    attribution: $('#dict-attribution'),
   },
 });
 state.wordLookup.attach();
