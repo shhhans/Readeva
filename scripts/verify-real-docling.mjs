@@ -288,7 +288,7 @@ async function main() {
   const row = page.locator('#library-tbody tr').first();
   await row.getByRole('button', { name: '打开' }).click();
   await page.waitForFunction(() => document.querySelector('#viewer')?.dataset.page);
-  await page.waitForSelector('#parse-status:has-text("已完成")', { timeout: 180_000 });
+  await page.waitForSelector('#parse-state .parse-entry[data-page-status="succeeded"]', { timeout: 180_000 });
   const headingText = await page.locator('#parse-content .parse-heading').first().textContent();
   const blockCount = await page.locator('#parse-content .parse-block').count();
   log(`browser: page=${await page.locator('#viewer').getAttribute('data-page')} heading=${headingText?.trim().slice(0, 50)} blocks=${blockCount}`);

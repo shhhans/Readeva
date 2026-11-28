@@ -7,6 +7,7 @@ import { startService, stopService } from '../helpers/service.js';
 import { startMockDocling } from '../helpers/mock-docling.js';
 
 const FIXTURE_A = path.resolve('tests/fixtures/sample-a.pdf');
+const FIXTURE_B = path.resolve('tests/fixtures/sample-b.pdf');
 
 // 服务级用例覆盖 Issue #5 验收 5 条：优先级、跳页重排、闲置补全、失败隔离与重试。
 // 每个用例使用独立的服务进程与 mock：队列是内存态，隔离后顺序断言才确定。
@@ -551,6 +552,32 @@ test('阅读位置与进度接口的参数校验与降级', async ({ request }) 
   expect(missingProgress.status()).toBe(404);
 });
 
+/** 与 server/docling.js 相同方式抽取单页，建立 sha256 → 'A<page>'/'B<page>' 映射（跨文档轮转断言用）。 */
+async function buildPageShaMap() {
+  const map = {};
+  const extract = async (file, pageNo) => {
+    const source = await PDFDocument.load(fs.readFileSync(file), {
+      ignoreEncryption: true,
+      updateMetadata: false,
+    });
+    const single = await PDFDocument.create();
+    single.setCreationDate(new Date(0));
+    single.setModificationDate(new Date(0));
+    const [copied] = await single.copyPages(source, [pageNo - 1]);
+    single.addPage(copied);
+    return Buffer.from(await single.save());
+  };
+  for (let p = 1; p <= 8; p += 1) {
+    const bytes = await extract(FIXTURE_A, p);
+    map[crypto.createHash('sha256').update(bytes).digest('hex')] = `A${p}`;
+  }
+  for (let p = 1; p <= 4; p += 1) {
+    const bytes = await extract(FIXTURE_B, p);
+    map[crypto.createHash('sha256').update(bytes).digest('hex')] = `B${p}`;
+  }
+  return map;
+}
+
 test('未配置解析服务：阅读位置更新降级不调度，进度接口仍可用', async ({ request }) => {
   // 不设置 READEVA_DOCLING_URL。
   service = await startService();
@@ -564,4 +591,87 @@ test('未配置解析服务：阅读位置更新降级不调度，进度接口�
   expect(snap.total).toBe(8);
   expect(snap.idle).toBe(8);
   expect(snap.succeeded).toBe(0);
+});
+
+test('pacing 按文档分桶：A 的固定间隔不挡 B 的派发（跨文档轮转后 B 按自己的节奏推进）', async ({ request }) => {
+  // 固定 800ms 间隔 + 快页（~200ms）：背景派发必然受间隔约束；A 的间隔不得拖住 B。
+  await setup({
+    mockOptions: { convertDelayMs: 100 },
+    env: { READEVA_PARSE_CONCURRENCY: '2', READEVA_PARSE_SWEEP_DELAY_MS: '800' },
+  });
+  const docA = await importFixtureA(request); // 8 页
+  const resB = await request.post(`${service.base}/api/documents/import`, {
+    headers: { 'content-type': 'application/pdf', 'x-filename': 'sample-b.pdf' },
+    data: fs.readFileSync(FIXTURE_B),
+  });
+  expect(resB.status()).toBe(201);
+  const docB = (await resB.json()).document; // 4 页
+
+  await putReadingPosition(request, docA.id, 1);
+  await putReadingPosition(request, docB.id, 1);
+  await waitFor(async () => {
+    const a = await getProgress(request, docA.id);
+    const b = await getProgress(request, docB.id);
+    return a.succeeded + b.succeeded;
+  }).toBe(12);
+
+  // 按单页字节 sha256 把 mock 提交记录映射回 (文档, 页码)。
+  const shaMap = await buildPageShaMap();
+  const seq = mock.requests
+    .filter((r) => r.kind === 'convert')
+    .map((r) => shaMap[r.sha256] ?? r.filename);
+  const at = (label) =>
+    Date.parse(mock.requests.find((r) => r.kind === 'convert' && shaMap[r.sha256] === label).at);
+
+  // B 的首页（开局填充）先于 A 的第一个被间隔约束的背景页派发：B 不被 A 的间隔挡住。
+  expect(seq.indexOf('B1')).toBeLessThan(seq.indexOf('A3'));
+  // B 的背景页间隔 ≈ B 自己的 800ms；若 A 的间隔叠加（旧全局实现）会被拖到 ~1600ms。
+  const gapB = at('B3') - at('B2');
+  expect(gapB, `B2→B3 间隔 ${gapB}ms 应 < 1200（按 B 自己的间隔，不被 A 叠加）`).toBeLessThan(1200);
+  // 每页恰好一次转换。
+  expect(mock.convertCalls()).toBe(12);
+});
+
+test('当前页豁免 pacing：跳页后当前页不被背景间隔拖住（固定间隔下立即派发）', async ({ request }) => {
+  // 固定 1200ms 间隔 + 页耗时 ~300ms：背景页必然被间隔约束，当前页豁免立即派发。
+  await setup({
+    mockOptions: { convertDelayMs: 150 },
+    env: { READEVA_PARSE_CONCURRENCY: '2', READEVA_PARSE_SWEEP_DELAY_MS: '1200' },
+  });
+  const doc = await importFixtureA(request);
+
+  const put1 = await putReadingPosition(request, doc.id, 1);
+  expect((await put1.json()).progress.running).toBe(2); // p1、p2 开局双槽
+  const tJump = Date.now();
+  // 立即跳页到 4：p4 成为当前页；p1/p2 仍在运行，p4 应随下一槽释放立即派发。
+  await putReadingPosition(request, doc.id, 4);
+  const at = (label) => {
+    const rec = mock.requests.find((r) => r.kind === 'convert' && r.filename === label);
+    return rec ? Date.parse(rec.at) : null;
+  };
+  await waitFor(() => at('page-4.pdf') !== null).toBe(true);
+  const gap = at('page-4.pdf') - tJump;
+  expect(gap, `跳页后 p4 派发间隔 ${gap}ms 应 < 900（豁免：~300ms；不豁免：1200ms+）`).toBeLessThan(900);
+
+  await waitFor(async () => (await getProgress(request, doc.id)).succeeded).toBe(8);
+  expect(mock.convertCalls()).toBe(8);
+});
+
+test('不节流档：pacing 系数 0 关闭动态间隔，背景派发不被任何等待拖住', async ({ request }) => {
+  await setup({
+    mockOptions: { convertDelayMs: 700 },
+    env: { READEVA_PARSE_CONCURRENCY: '2', READEVA_PARSE_SWEEP_PACING_FACTOR: '0' },
+  });
+  const doc = await importFixtureA(request);
+
+  await putReadingPosition(request, doc.id, 1);
+  await waitFor(async () => (await getProgress(request, doc.id)).succeeded).toBe(8);
+  // 第 3、4 次提交（两个并发槽各自的第二个背景页）：系数 0 → 槽释放即派发，
+  // 间隔 ≈ 并行页完成时间差（<150ms）；默认 0.5 系数下该间隔 ≈ 转换耗时×0.5（≥350ms）。
+  const ats = mock.requests
+    .filter((r) => r.kind === 'convert')
+    .map((r) => Date.parse(r.at));
+  const gap = ats[3] - ats[2];
+  expect(gap, `第 3→4 次提交间隔 ${gap}ms 应 < 150（系数 0：无 pacing 等待）`).toBeLessThan(150);
+  expect(mock.convertCalls()).toBe(8);
 });

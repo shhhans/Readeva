@@ -58,6 +58,16 @@ const config = {
       process.env.READEVA_PARSE_SWEEP_PACING_FACTOR ??
       0.5,
   ),
+  // 客户端会话宽限期（毫秒，Issue #6）：超过该时长无客户端活动（阅读位置上报/
+  // 进度轮询/状态轮询等）即视为客户端退出——完成已开始页、清除未开始队列。
+  // 默认 300000（5 分钟）：浏览器隐藏标签页会节流页面内定时器（约 1 次/分钟），
+  // 阅读视图内 8s 慢刷新心跳被稀释后仍需留足余量，避免正常阅读被误判退出；
+  // 默认值必须大于客户端心跳间隔（README 注明取舍）。
+  clientGraceMs: Number(
+    parseArg(process.argv, '--client-grace-ms') ??
+      process.env.READEVA_CLIENT_GRACE_MS ??
+      300000,
+  ),
 };
 
 if (!Number.isFinite(config.port) || config.port < 0 || config.port > 65535) {
@@ -84,6 +94,7 @@ const parseTasks = doclingAdapter
       concurrency: config.parseConcurrency,
       sweepDelayMs: config.parseSweepDelayMs,
       sweepPacingFactor: config.parseSweepPacingFactor,
+      clientGraceMs: config.clientGraceMs,
     })
   : null;
 const app = express();
@@ -145,6 +156,8 @@ app.get('/api/documents', (req, res) => {
 app.get('/api/documents/:id', (req, res) => {
   const doc = library.getDocument(req.params.id);
   if (!doc) return res.status(404).json({ error: 'document not found' });
+  // 打开文档 = 客户端活动（会话存续，Issue #6）。
+  parseTasks?.touch(doc.id);
   res.json({ document: doc });
 });
 
@@ -153,6 +166,7 @@ app.get('/api/documents/:id/file', (req, res) => {
   if (!doc || !library.hasPdf(doc.id)) {
     return res.status(404).json({ error: 'document not found' });
   }
+  parseTasks?.touch(doc.id);
   // 内容寻址副本，字节永不变更，可长期缓存。
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   res.type('application/pdf');
@@ -161,9 +175,11 @@ app.get('/api/documents/:id/file', (req, res) => {
 
 app.get('/api/documents/:id/progress', async (req, res, next) => {
   try {
-    if (!library.getDocument(req.params.id)) {
+    const doc = library.getDocument(req.params.id);
+    if (!doc) {
       return res.status(404).json({ error: 'document not found' });
     }
+    parseTasks?.touch(doc.id);
     res.json({ progress: await library.getProgress(req.params.id) });
   } catch (err) {
     next(err);
@@ -177,6 +193,8 @@ app.put('/api/documents/:id/progress', async (req, res, next) => {
       return res.status(400).json({ error: 'page and zoom must be numbers' });
     }
     const progress = await library.setProgress(req.params.id, page, zoom);
+    // 阅读位置保存 = 客户端活动（会话存续，Issue #6）。
+    parseTasks?.touch(req.params.id);
     res.json({ progress });
   } catch (err) {
     if (err.status === 404) {
@@ -184,6 +202,15 @@ app.put('/api/documents/:id/progress', async (req, res, next) => {
     }
     next(err);
   }
+});
+
+// 客户端会话状态（Issue #6）：只读观察端点，不刷新 lastSeen。
+// 未配置解析服务时返回 supported:false（无可到期处置的队列）。
+app.get('/api/documents/:id/session', (req, res) => {
+  const doc = library.getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'document not found' });
+  if (!parseTasks) return res.json({ documentId: doc.id, supported: false });
+  res.json(parseTasks.sessionInfo(doc.id));
 });
 
 /* ---------------- 页解析（Issue #3） ---------------- */
@@ -233,6 +260,8 @@ app.post('/api/documents/:id/pages/:page/parse', (req, res, next) => {
     if (!doclingAdapter) {
       return res.status(503).json({ error: 'docling service not configured' });
     }
+    // 解析请求 = 客户端活动（会话存续，Issue #6）。
+    parseTasks.touch(req.params.id);
     const outcome = parseTasks.start(req.params.id, page);
     if (outcome === 'reused') {
       const payload = parseStatusPayload(req.params.id, page);
@@ -253,6 +282,8 @@ app.post('/api/documents/:id/pages/:page/parse', (req, res, next) => {
 app.get('/api/documents/:id/pages/:page/parse', (req, res) => {
   const page = resolvePageParam(req, res);
   if (page === null) return;
+  // 状态轮询 = 客户端活动（会话存续，Issue #6）。
+  parseTasks?.touch(req.params.id);
   res.json(parseStatusPayload(req.params.id, page));
 });
 
@@ -260,7 +291,8 @@ app.get('/api/documents/:id/pages/:page/parse', (req, res) => {
 app.get('/api/documents/:id/pages/:page/parse/result', (req, res) => {
   const page = resolvePageParam(req, res);
   if (page === null) return;
-  const record = parseStore.getRecord(req.params.id, page);
+  // 结果获取 = 客户端活动（会话存续，Issue #6）。
+  parseTasks?.touch(req.params.id);  const record = parseStore.getRecord(req.params.id, page);
   if (!record || record.status !== 'succeeded') {
     return res.status(404).json({ error: 'parse result not found' });
   }
@@ -307,9 +339,11 @@ app.put('/api/documents/:id/reading-position', (req, res, next) => {
 
 // 整本解析进度查询（Issue #5）：逐页状态 + 整体进度 + 失败原因；
 // 基于 parse-store 轻量状态索引构建（B1：不逐轮全量读盘），服务重启后进度不丢。
+// 进度轮询同时作为客户端会话心跳（Issue #6）。
 app.get('/api/documents/:id/parse/progress', (req, res) => {
   const doc = library.getDocument(req.params.id);
   if (!doc) return res.status(404).json({ error: 'document not found' });
+  parseTasks?.touch(doc.id);
   const progress = buildParseProgress({
     store: parseStore,
     library,
