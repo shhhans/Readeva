@@ -16,7 +16,7 @@ import { DoclingServiceError, extractPage } from './docling.js';
  * - 已完成页从队列摘除并复用结果；失败页标记失败、不回队、不阻塞队列；
  * - 队列按序补全其余未解析页（闲置补全）；失败页仅通过显式请求重试；
  * - 全局并发上限可配置（默认 2，与 docling_service 线程池对齐）；背景派发 pacing
- *   动态自适应设备性能（最近 N 页转换耗时 × 系数，钐制上限），可用固定间隔覆盖。
+ *   动态自适应设备性能（最近 N 页转换耗时 × 系数，钳制上限），可用固定间隔覆盖。
  */
 export class ParseTaskManager {
   constructor({ store, adapter, library, concurrency = 2, sweepDelayMs = 0, sweepPacingFactor = 0.5 }) {
@@ -35,7 +35,7 @@ export class ParseTaskManager {
     // 动态 pacing 系数：背景派发间隔 = 最近转换耗时估计 × 系数。设备快→间隔小
     // 吞吐高；设备慢→间隔大、留 CPU 给阅读交互。系数 >0.5 时并发 2 下会出现 CPU 空隙。
     this.sweepPacingFactor = Number.isFinite(factor) && factor > 0 ? factor : 0.5;
-    // 背景派发间隔钐制上限（避免慢页估计把间隔拉到数秒以上）。
+    // 背景派发间隔钳制上限（避免慢页估计把间隔拉到数秒以上）。
     this.MAX_SWEEP_INTERVAL_MS = 5000;
     // 最近转换耗时样本（派发→succeeded/failed，不含排队等待），滚动估计用。
     this.conversionDurations = [];
@@ -205,7 +205,7 @@ export class ParseTaskManager {
 
   /**
    * 背景派发间隔：固定覆盖值（READEVA_PARSE_SWEEP_DELAY_MS > 0）优先；
-   * 否则动态 pacing = 最近转换耗时估计 × 系数，钐制 [0, MAX_SWEEP_INTERVAL_MS]。
+   * 否则动态 pacing = 最近转换耗时估计 × 系数，钳制 [0, MAX_SWEEP_INTERVAL_MS]。
    * 无样本（开局首扫）返回 0：立即填满并发槽，不做 pacing。
    */
   sweepIntervalMs() {

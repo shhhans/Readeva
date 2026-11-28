@@ -37,7 +37,9 @@ async function openReader(page, nameText) {
 }
 
 async function waitForPanelDone(page) {
-  await expect(page.locator('#parse-status')).toHaveText('已完成', { timeout: 15000 });
+  await expect(
+    page.locator('#parse-state .parse-entry[data-page-status="succeeded"]'),
+  ).toBeVisible({ timeout: 15000 });
 }
 
 test('导入并打开文档：原页立即渲染，右侧解析面板随后展示结构化内容', async ({ page }) => {
@@ -46,9 +48,12 @@ test('导入并打开文档：原页立即渲染，右侧解析面板随后展�
   await expect(page.locator('#library-tbody tr')).toHaveCount(1);
 
   await openReader(page, 'sample-a.pdf');
-  // 原页先就绪；解析状态可见（未开始/解析中）。
+  // 原页先就绪；解析状态在内容列表内联可见（未开始/解析中/已完成）。
   await expect(page.locator('#parse-panel')).toBeVisible();
-  await expect(page.locator('#parse-status')).toHaveText(/未开始|解析中…|已完成/);
+  await expect(page.locator('#parse-state .parse-entry')).toHaveAttribute(
+    'data-page-status',
+    /idle|queued|running|succeeded/,
+  );
 
   // 解析完成后按阅读顺序展示标题、段落与列表。
   await waitForPanelDone(page);
@@ -176,13 +181,16 @@ test('解析失败状态与原因可见，重试后恢复', async ({ page }) => 
   await page.press('#page-input', 'Enter');
   await expect(page.locator('#viewer')).toHaveAttribute('data-page', '2');
 
-  await expect(page.locator('#parse-status')).toHaveText('解析失败', { timeout: 15000 });
-  await expect(page.locator('#parse-error')).toContainText('mock conversion exploded');
-  await expect(page.locator('#parse-retry')).toBeVisible();
+  // 失败状态内联在内容列表：状态徽标 + 失败原因 + 显式重试按钮。
+  const failedEntry = page.locator('#parse-state .parse-entry[data-page-status="failed"]');
+  await expect(failedEntry).toBeVisible({ timeout: 15000 });
+  await expect(failedEntry.locator('.parse-entry-badge')).toHaveText('解析失败');
+  await expect(failedEntry).toContainText('mock conversion exploded');
+  await expect(failedEntry.locator('.parse-entry-retry')).toBeVisible();
 
   // 解除按页失败注入后点击重试 → 完成。
   mock.setFailPages({});
-  await page.click('#parse-retry');
+  await failedEntry.locator('.parse-entry-retry').click();
   await waitForPanelDone(page);
   await expect(page.locator('#parse-content .parse-paragraph').first()).toContainText(
     'stored per content identity',

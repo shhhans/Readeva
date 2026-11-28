@@ -84,20 +84,18 @@
         <aside id="parse-panel">
           <header class="parse-panel-header">
             <h2>结构化内容</h2>
-            <span id="parse-status" class="parse-status" data-kind="idle">未开始</span>
+            <!-- 整体进度：面板头部一处静态文本，仅在事件（派发/完成/失败/重试）时更新。 -->
+            <span id="parse-summary" class="parse-summary" hidden></span>
           </header>
-          <!-- 整本解析进度（Issue #5）：逐页状态 + 整体进度，点击页码跳到对应页。 -->
-          <div id="parse-progress" class="parse-progress" hidden>
-            <p id="parse-progress-summary" class="parse-progress-summary"></p>
-            <div id="parse-progress-pages" class="parse-progress-pages"></div>
-          </div>
-          <p id="parse-error" class="parse-error" hidden></p>
-          <button id="parse-retry" type="button" hidden>重试解析</button>
           <p id="parse-hint" class="parse-hint" hidden>
             解析服务未配置：启动独立 Docling 服务并在服务端设置 READEVA_DOCLING_URL 后，
             当前页的结构化内容会展示在这里。
           </p>
-          <div id="parse-content" class="parse-content"></div>
+          <!-- 内容列表：顶部为当前页内联状态条目（徽标/失败原因/重试），下方为内容块。 -->
+          <div id="parse-content" class="parse-content">
+            <div id="parse-state" class="parse-state"></div>
+            <div id="parse-blocks" class="parse-blocks"></div>
+          </div>
         </aside>
       </div>
       <!-- 主动定位失败提示（悬浮失败静默不打断阅读，主动定位失败可提示）。 -->

@@ -46,7 +46,10 @@ test('未配置解析服务：阅读不受影响，面板提示解析服务未�
   const row = page.locator('#library-tbody tr', { hasText: 'sample-a.pdf' });
   await row.getByRole('button', { name: '打开' }).click();
   await expect(page.locator('#viewer')).toHaveAttribute('data-page', '1');
-  await expect(page.locator('#parse-status')).toHaveText('解析服务未配置');
+  // 一行静态提示；界面无任何进度残留（无整体进度文本、无内联状态条目）。
   await expect(page.locator('#parse-hint')).toBeVisible();
+  await expect(page.locator('#parse-hint')).toContainText('解析服务未配置');
+  await expect(page.locator('#parse-summary')).toBeHidden();
+  await expect(page.locator('#parse-state .parse-entry')).toHaveCount(0);
   await expect(page.locator('#parse-content .parse-block')).toHaveCount(0);
 });

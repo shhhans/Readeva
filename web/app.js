@@ -10,7 +10,7 @@ import {
   updateReadingPosition,
 } from './api.js';
 import { PdfViewer } from './pdf-viewer.js';
-import { ParsePanel, PROGRESS_JUMP_EVENT } from './parse-panel.js';
+import { ParsePanel } from './parse-panel.js';
 import { PageLinkage } from './page-linkage.js';
 
 const state = {
@@ -313,14 +313,6 @@ document.addEventListener('keydown', (event) => {
 
 // 右侧解析面板：展示当前页解析状态与结构化内容。
 state.parsePanel = new ParsePanel({ root: $('#parse-panel') });
-
-// 整本进度页码芯片：点击跳到对应页，面板与覆盖层随当前页更新（Issue #5）。
-document.addEventListener(PROGRESS_JUMP_EVENT, (event) => {
-  if (state.view !== 'reader' || !state.docId || !state.viewer) return;
-  const page = event.detail?.page;
-  if (!Number.isInteger(page)) return;
-  applyViewerAction(() => state.viewer.goTo(page, state.viewer.zoom));
-});
 
 // 原页与内容块双向联动（Issue #4）：覆盖层、双向高亮与主动定位。
 const linkage = new PageLinkage({

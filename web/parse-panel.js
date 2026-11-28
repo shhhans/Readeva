@@ -9,78 +9,113 @@ import {
 
 const POLL_INTERVAL_MS = 500;
 const POLL_MAX_MS = 10 * 60 * 1000;
-/** 整本进度轮询间隔：后台补全/失败也要在界面上可见（Issue #5）。 */
-const PROGRESS_POLL_INTERVAL_MS = 1000;
 /** 自愈重报阅读位置的冷却时间（避免无队列可建时重复请求）。 */
 const SELF_HEAL_COOLDOWN_MS = 10_000;
 
 /** 内容块列表变化事件：联动层据此重建原页覆盖框（Issue #4）。 */
 export const BLOCKS_CHANGED_EVENT = 'parse-blocks-changed';
 
-/** 点击整本进度页码芯片：阅读视图跳到对应页（Issue #5）。 */
-export const PROGRESS_JUMP_EVENT = 'parse-progress-jump';
+/** 单页状态 → 内容列表内联状态条目的徽标文案。 */
+const STATE_LABELS = {
+  idle: '未开始',
+  queued: '排队中',
+  running: '解析中',
+  succeeded: '已完成',
+  failed: '解析失败',
+};
 
 /**
  * 阅读视图右侧面板：展示当前页解析状态与结构化内容。
  *
  * - 原页立即打开，面板独立异步加载，不阻塞阅读；
- * - 状态可见：未开始 / 解析中（已开始）/ 已完成 / 解析失败（含原因，可重试）；
+ * - 单页状态内联在内容列表里（未开始/排队中/解析中/已完成/解析失败）；
+ *   失败条目带状态徽标、失败原因与显式重试按钮；
+ * - 整体进度只有面板头部一处静态文本，仅在事件（派发/完成/失败/重试/翻页）时
+ *   取一次快照更新——不做定时轮询、不重建页码芯片；
  * - 按阅读顺序渲染标题、段落、列表、表格与图片资源；缺少位置的块照常展示；
  * - 服务端已持久化的页直接取回结果，不重新解析。
  */
 export class ParsePanel {
   constructor({ root }) {
     this.root = root;
-    this.statusEl = root.querySelector('#parse-status');
-    this.errorEl = root.querySelector('#parse-error');
-    this.retryEl = root.querySelector('#parse-retry');
     this.contentEl = root.querySelector('#parse-content');
+    this.stateEl = root.querySelector('#parse-state');
+    this.blocksEl = root.querySelector('#parse-blocks');
     this.hintEl = root.querySelector('#parse-hint');
-    this.progressEl = root.querySelector('#parse-progress');
-    this.progressSummaryEl = root.querySelector('#parse-progress-summary');
-    this.progressPagesEl = root.querySelector('#parse-progress-pages');
+    this.summaryEl = root.querySelector('#parse-summary');
     this.serviceConfigured = null; // null = 尚未探测
     this.docId = null;
     this.page = null;
     this.generation = 0;
     this.pollTimer = 0;
     this.pollDeadline = 0;
-    this.progressTimer = 0;
+    this.summaryTimer = 0;
+    this.stateKey = '';
     this.lastSelfHealAt = 0;
-
-    this.retryEl.addEventListener('click', () => {
-      this.startParse().catch(() => {});
-    });
-    // 整本进度页码芯片：点击跳到对应页（跳转逻辑由阅读视图处理，组件零耦合）。
-    this.progressPagesEl.addEventListener('click', (event) => {
-      const chip = event.target.closest('.parse-page-chip');
-      if (!chip) return;
-      const page = Number(chip.dataset.page);
-      if (!Number.isInteger(page) || page < 1) return;
-      this.root.dispatchEvent(
-        new CustomEvent(PROGRESS_JUMP_EVENT, { detail: { page }, bubbles: true }),
-      );
-    });
   }
 
-  /* ---------------- 状态展示 ---------------- */
+  /* ---------------- 内联状态（内容列表内） ---------------- */
 
-  setStatus(text, kind = '') {
-    this.statusEl.textContent = text;
-    this.statusEl.dataset.kind = kind;
+  /**
+   * 渲染当前页的状态条目：徽标 + 说明 +（失败时）显式重试按钮。
+   * 状态条目位于内容列表顶部，与内容块同属一个滚动区。
+   */
+  renderState(status, error = '') {
+    this.stateEl.replaceChildren();
+    if (!status) return;
+    const entry = document.createElement('div');
+    entry.className = `parse-entry parse-entry-${status}`;
+    entry.dataset.pageStatus = status;
+    const badge = document.createElement('span');
+    badge.className = 'parse-entry-badge';
+    badge.textContent = STATE_LABELS[status] ?? status;
+    const text = document.createElement('span');
+    text.className = 'parse-entry-text';
+    text.textContent = this.stateText(status, error);
+    entry.append(badge, text);
+    if (status === 'failed') {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'parse-entry-retry';
+      retry.textContent = '重试解析';
+      retry.addEventListener('click', () => {
+        this.startParse().catch(() => {});
+      });
+      entry.append(retry);
+    }
+    this.stateEl.append(entry);
   }
 
-  showError(text) {
-    this.errorEl.textContent = text ?? '';
-    this.errorEl.hidden = !text;
+  /** 状态条目的说明文案（页码来自当前页）。 */
+  stateText(status, error) {
+    const page = this.page ?? '?';
+    switch (status) {
+      case 'idle':
+        return `第 ${page} 页尚未开始解析`;
+      case 'queued':
+        return `第 ${page} 页排队等待解析…`;
+      case 'running':
+        return `第 ${page} 页正在解析…`;
+      case 'succeeded':
+        return `第 ${page} 页解析完成`;
+      case 'failed':
+        return `第 ${page} 页解析失败：${error || '原因未知'}`;
+      default:
+        return '';
+    }
   }
 
-  showRetry(visible) {
-    this.retryEl.hidden = !visible;
+  /** 更新单页状态；状态（及原因）变化时返回 true（用于触发事件式刷新）。 */
+  setState(status, error = '') {
+    const key = `${status}|${error}`;
+    if (key === this.stateKey) return false;
+    this.stateKey = key;
+    this.renderState(status, error);
+    return true;
   }
 
   clearContent() {
-    this.contentEl.replaceChildren();
+    this.blocksEl.replaceChildren();
     this.notifyBlocksChanged();
   }
 
@@ -94,16 +129,17 @@ export class ParsePanel {
     this.generation += 1;
     clearTimeout(this.pollTimer);
     this.pollTimer = 0;
-    this.stopProgressPolling();
-    this.showProgress(false);
+    clearTimeout(this.summaryTimer);
+    this.summaryTimer = 0;
+    this.hideSummary();
     this.lastSelfHealAt = 0;
     this.docId = null;
     this.page = null;
     this.pollDeadline = 0;
-    this.setStatus('未开始', 'idle');
-    this.showError('');
-    this.showRetry(false);
+    this.stateKey = '';
+    this.stateEl.replaceChildren();
     this.clearContent();
+    this.hintEl.hidden = true;
   }
 
   /** 切换到指定文档页；同页重复调用为无操作。 */
@@ -112,14 +148,15 @@ export class ParsePanel {
     this.generation += 1;
     clearTimeout(this.pollTimer);
     this.pollTimer = 0;
+    clearTimeout(this.summaryTimer);
+    this.summaryTimer = 0;
     this.docId = docId;
     this.page = page;
-    this.showError('');
-    this.showRetry(false);
+    this.stateKey = '';
+    this.stateEl.replaceChildren();
     this.clearContent();
-    this.setStatus('未开始', 'idle');
-    // 整本进度独立轮询：后台补全/失败不依赖当前页状态（Issue #5）。
-    this.refreshProgress();
+    // 尚未探测到服务配置前不渲染任何状态条目：避免「未配置解析服务」时闪现进度残留。
+    if (this.serviceConfigured === true) this.setState('idle');
     this.load().catch((err) => {
       console.warn('解析面板加载失败', err);
     });
@@ -127,7 +164,6 @@ export class ParsePanel {
 
   async load() {
     const generation = this.generation;
-    const { docId, page } = this;
     this.pollDeadline = 0;
     if (this.serviceConfigured === null) {
       const service = await fetchParseService();
@@ -136,15 +172,19 @@ export class ParsePanel {
       this.serviceConfigured = Boolean(service.configured);
     }
     if (!this.serviceConfigured) {
-      this.setStatus('解析服务未配置', 'unavailable');
+      // 未配置解析服务：只保留一行静态提示，界面无任何进度残留。
+      this.hideSummary();
       this.hintEl.hidden = false;
-      this.stopProgressPolling();
-      this.showProgress(false);
+      this.stateKey = '';
+      this.stateEl.replaceChildren();
+      this.clearContent();
       return;
     }
     this.hintEl.hidden = true;
-    // 服务探测结论为已配置后才启动整本进度展示（避免未配置时进度区闪现）。
-    this.refreshProgress();
+    // 服务已配置：此时才渲染单页状态条目（此前界面无任何进度残留）。
+    if (!this.stateKey) this.setState('idle');
+    // 事件式刷新整体进度（打开/翻页等事件后取一次快照，不轮询）。
+    this.refreshSummary();
     await this.refreshStatus(generation, { startIfIdle: true });
   }
 
@@ -156,8 +196,8 @@ export class ParsePanel {
       status = await fetchParseStatus(docId, page);
     } catch (err) {
       if (generation !== this.generation) return;
-      this.setStatus('状态未知', 'failed');
-      this.showError(`获取解析状态失败：${err.message}`);
+      this.setState('failed', `获取解析状态失败：${err.message}`);
+      this.refreshSummary();
       return;
     }
     if (generation !== this.generation) return;
@@ -167,13 +207,11 @@ export class ParsePanel {
       return;
     }
     if (status.status === 'failed') {
-      this.setStatus('解析失败', 'failed');
-      this.showError(status.error ?? '解析失败，原因未知');
-      this.showRetry(true);
+      if (this.setState('failed', status.error ?? '解析失败，原因未知')) this.refreshSummary();
       return;
     }
     if (status.status === 'running') {
-      this.setStatus('解析中…', 'running');
+      if (this.setState('running')) this.refreshSummary();
       // 首次加载即见到「已开始」（如另一端已发起）时同样需要超时基线。
       if (!this.pollDeadline) this.pollDeadline = Date.now() + POLL_MAX_MS;
       this.schedulePoll(generation);
@@ -181,7 +219,7 @@ export class ParsePanel {
     }
     if (status.status === 'queued') {
       // 已被调度器接受但并发占满：排在队列中等待解析。
-      this.setStatus('已排队，等待解析…', 'running');
+      if (this.setState('queued')) this.refreshSummary();
       if (!this.pollDeadline) this.pollDeadline = Date.now() + POLL_MAX_MS;
       this.schedulePoll(generation);
       return;
@@ -190,29 +228,28 @@ export class ParsePanel {
     if (startIfIdle) {
       await this.startParse(generation);
     } else {
-      this.setStatus('未开始', 'idle');
+      this.setState('idle');
     }
   }
 
   async startParse(generation = this.generation) {
     if (generation !== this.generation) return;
     const { docId, page } = this;
-    this.showError('');
-    this.showRetry(false);
     let body;
     try {
       body = await requestPageParse(docId, page);
     } catch (err) {
       if (generation !== this.generation) return;
-      this.setStatus('解析失败', 'failed');
-      this.showError(`发起解析失败：${err.message}`);
-      this.showRetry(true);
+      this.setState('failed', `发起解析失败：${err.message}`);
+      this.refreshSummary();
       return;
     }
     if (generation !== this.generation) return;
-    this.setStatus(body?.status === 'queued' ? '已排队，等待解析…' : '解析中…', 'running');
+    this.setState(body?.status === 'queued' ? 'queued' : 'running');
     this.pollDeadline = Date.now() + POLL_MAX_MS;
     this.schedulePoll(generation);
+    // 派发事件（含显式重试）：刷新一次整体进度。
+    this.refreshSummary();
   }
 
   schedulePoll(generation) {
@@ -225,9 +262,8 @@ export class ParsePanel {
   async pollOnce(generation) {
     if (generation !== this.generation) return;
     if (Date.now() > this.pollDeadline) {
-      this.setStatus('解析超时', 'failed');
-      this.showError('解析任务长时间未完成，可稍后重试。');
-      this.showRetry(true);
+      this.setState('failed', '解析任务长时间未完成，可稍后重试。');
+      this.refreshSummary();
       return;
     }
     const { docId, page } = this;
@@ -249,91 +285,65 @@ export class ParsePanel {
     await this.refreshStatus(generation);
   }
 
-  /* ---------------- 整本进度（Issue #5） ---------------- */
+  /* ---------------- 整体进度（事件式静态文本） ---------------- */
 
-  showProgress(visible) {
-    this.progressEl.hidden = !visible;
-    if (!visible) {
-      this.progressSummaryEl.textContent = '';
-      this.progressPagesEl.replaceChildren();
+  /** 隐藏整体进度文本（未配置解析服务 / 无快照时）。 */
+  hideSummary() {
+    this.summaryEl.textContent = '';
+    this.summaryEl.hidden = true;
+  }
+
+  /**
+   * 事件式刷新整体进度：仅在派发/完成/失败/重试/翻页等事件后取一次快照。
+   * 没有定时轮询，也不重建任何页码列表（面板头部只有一处静态文本）。
+   */
+  refreshSummary() {
+    if (!this.docId || this.serviceConfigured !== true) return;
+    if (this.summaryTimer) return; // 同一批事件合并为一次刷新
+    this.summaryTimer = setTimeout(() => {
+      this.summaryTimer = 0;
+      this.fetchSummary().catch(() => {});
+    }, 0);
+  }
+
+  /** 取一次整本进度快照：更新头部静态文本，并做低成本自愈检查。 */
+  async fetchSummary() {
+    const generation = this.generation;
+    let snapshot;
+    try {
+      snapshot = await fetchParseProgress(this.docId);
+    } catch {
+      /* 服务不可达/重启中：保持当前文本 */
+      return;
+    }
+    if (generation !== this.generation) return;
+    this.applySummary(snapshot);
+    // 低成本自愈：队列与进行中任务都丢失（如服务重启）且仍有未开始页时，
+    // 自动重新上报阅读位置恢复调度（带冷却；Issue #6 的完整重连调度另行交付）。
+    if (snapshot.idle > 0 && snapshot.running === 0 && snapshot.queued === 0) {
+      const now = Date.now();
+      if (now - this.lastSelfHealAt > SELF_HEAL_COOLDOWN_MS) {
+        this.lastSelfHealAt = now;
+        updateReadingPosition(this.docId, this.page).catch(() => {});
+      }
     }
   }
 
-  stopProgressPolling() {
-    clearTimeout(this.progressTimer);
-    this.progressTimer = 0;
-  }
-
-  /** 轮询整本解析进度：逐页状态、整体计数与失败原因；服务不可达时跳过本轮。 */
-  refreshProgress() {
-    // 以服务探测结果为准（pending 阶段不渲染，未配置时保持隐藏）。
-    if (!this.docId || this.serviceConfigured !== true) return;
-    clearTimeout(this.progressTimer);
-    const generation = this.generation;
-    fetchParseProgress(this.docId)
-      .then((snapshot) => {
-        if (generation !== this.generation) return;
-        this.renderProgress(snapshot);
-        // 低成本自愈：队列与进行中任务都丢失（如服务重启）且仍有未开始页时，
-        // 自动重新上报阅读位置恢复调度（带冷却；Issue #6 的完整重连调度另行交付）。
-        if (
-          this.serviceConfigured === true &&
-          snapshot.idle > 0 &&
-          snapshot.running === 0 &&
-          snapshot.queued === 0
-        ) {
-          const now = Date.now();
-          if (now - this.lastSelfHealAt > SELF_HEAL_COOLDOWN_MS) {
-            this.lastSelfHealAt = now;
-            updateReadingPosition(this.docId, this.page).catch(() => {});
-          }
-        }
-      })
-      .catch(() => {
-        /* 服务不可达/重启中：跳过本轮，继续轮询 */
-      })
-      .finally(() => {
-        if (generation !== this.generation || this.serviceConfigured !== true) return;
-        this.progressTimer = setTimeout(() => this.refreshProgress(), PROGRESS_POLL_INTERVAL_MS);
-      });
-  }
-
-  renderProgress(snapshot) {
-    // 未配置/尚未探测完成时保持隐藏（迟到的响应不得显示进度区）。
-    if (this.serviceConfigured !== true) return;
-    this.showProgress(true);
-    const parts = [`已解析 ${snapshot.succeeded}/${snapshot.total}`];
+  /** 整体进度静态文本（如「解析 12/215 · 失败 1」）。 */
+  applySummary(snapshot) {
+    if (!snapshot || this.serviceConfigured !== true) {
+      this.hideSummary();
+      return;
+    }
+    const parts = [`解析 ${snapshot.succeeded}/${snapshot.total}`];
     if (snapshot.failed > 0) parts.push(`失败 ${snapshot.failed}`);
     if (snapshot.running > 0) parts.push(`解析中 ${snapshot.running}`);
     if (snapshot.queued > 0) parts.push(`排队 ${snapshot.queued}`);
-    this.progressSummaryEl.textContent = parts.join(' · ');
-
-    const fragment = document.createDocumentFragment();
-    for (const page of snapshot.pages ?? []) {
-      fragment.append(this.renderPageChip(page));
-    }
-    this.progressPagesEl.replaceChildren(fragment);
+    this.summaryEl.textContent = parts.join(' · ');
+    this.summaryEl.hidden = false;
   }
 
-  renderPageChip(page) {
-    const chip = document.createElement('button');
-    chip.type = 'button';
-    chip.className = `parse-page-chip chip-${page.status}`;
-    chip.dataset.page = String(page.page);
-    chip.dataset.status = page.status;
-    chip.textContent = String(page.page);
-    const labels = {
-      succeeded: '已解析',
-      failed: `解析失败：${page.error ?? '原因未知'}`,
-      running: '解析中',
-      queued: '排队等待解析',
-      idle: '未开始',
-    };
-    const label = `第 ${page.page} 页 ${labels[page.status] ?? page.status}`;
-    chip.title = label;
-    chip.setAttribute('aria-label', label);
-    return chip;
-  }
+  /* ---------------- 结果加载与内容渲染 ---------------- */
 
   async loadResult(generation) {
     const { docId, page } = this;
@@ -342,32 +352,35 @@ export class ParsePanel {
       ({ parse: result } = await fetchParseResult(docId, page));
     } catch (err) {
       if (generation !== this.generation) return;
-      this.setStatus('解析失败', 'failed');
-      this.showError(`获取解析结果失败：${err.message}`);
-      this.showRetry(true);
+      this.setState('failed', `获取解析结果失败：${err.message}`);
+      this.refreshSummary();
       return;
     }
     if (generation !== this.generation) return;
-    this.setStatus('已完成', 'succeeded');
+    this.setState('succeeded');
     this.renderBlocks(result.blocks);
+    // 完成事件：刷新一次整体进度。
+    this.refreshSummary();
   }
-
-  /* ---------------- 内容渲染 ---------------- */
 
   renderBlocks(blocks) {
     this.clearContent();
     const fragment = document.createDocumentFragment();
+    let count = 0;
     for (const block of blocks ?? []) {
       const node = this.renderBlock(block);
-      if (node) fragment.append(node);
+      if (node) {
+        fragment.append(node);
+        count += 1;
+      }
     }
-    if (fragment.childNodes.length === 0) {
+    if (count === 0) {
       const empty = document.createElement('p');
       empty.className = 'parse-empty';
       empty.textContent = '本页没有可展示的解析内容。';
       fragment.append(empty);
     }
-    this.contentEl.append(fragment);
+    this.blocksEl.append(fragment);
     this.notifyBlocksChanged();
   }
 

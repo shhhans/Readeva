@@ -39,7 +39,9 @@ async function openReader(page, nameText) {
 }
 
 async function waitForPanelDone(page) {
-  await expect(page.locator('#parse-status')).toHaveText('已完成', { timeout: 15000 });
+  await expect(
+    page.locator('#parse-state .parse-entry[data-page-status="succeeded"]'),
+  ).toBeVisible({ timeout: 15000 });
 }
 
 async function jumpToPage(page, number) {
@@ -218,13 +220,17 @@ test('缺失/无效位置：内容照常展示，悬浮静默，主动定位有�
   await degenerate.click();
   await expect(toast).toBeVisible();
   await expect(toast).toContainText('没有可用位置');
-  await expect(page.locator('#parse-status')).toHaveText('已完成');
-  await expect(page.locator('#parse-error')).toBeHidden();
+  await expect(
+    page.locator('#parse-state .parse-entry[data-page-status="succeeded"]'),
+  ).toBeVisible();
+  await expect(page.locator('#parse-state .parse-entry[data-page-status="failed"]')).toHaveCount(0);
   await expect(page.locator('#parse-content .parse-block.active')).toHaveCount(0);
 
   await missing.click();
   await expect(toast).toBeVisible();
-  await expect(page.locator('#parse-status')).toHaveText('已完成');
+  await expect(
+    page.locator('#parse-state .parse-entry[data-page-status="succeeded"]'),
+  ).toBeVisible();
 
   // 提示自动消失。
   await expect(toast).toBeHidden({ timeout: 6000 });
