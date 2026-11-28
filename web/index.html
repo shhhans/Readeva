@@ -123,9 +123,11 @@
       </div>
       <!-- 主动定位失败提示（悬浮失败静默不打断阅读，主动定位失败可提示）。 -->
       <div id="locate-toast" role="status" hidden></div>
-      <!-- 选词工具条（Issue #7）：在右侧内容选中文本后浮现，点「查词」发起 ECDICT 离线查询。 -->
+      <!-- 选词工具条（Issue #7 / Issue #8）：右侧内容选中文本后浮现，
+           「查词」发起 ECDICT 离线查询，「翻译」主动翻译选文（默认中文，MiniMax）。 -->
       <div id="selection-toolbar" hidden>
         <button id="dict-lookup-button" type="button">查词</button>
+        <button id="translate-selection-button" type="button">翻译</button>
       </div>
     </section>
   </div>

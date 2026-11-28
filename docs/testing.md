@@ -93,9 +93,24 @@ B1 规模回归：「B1 规模回归：进度/重排接口走轻量状态索引�
 
 补充用例：「构建脚本」（固定 CSV → 键去重/字节序排序/许可声明落盘/索引与词条文件一一对应；缺文件报错）；「词典数据未准备」服务级 503（显式空目录，不依赖真实数据是否已构建）；「离线查询」用独立服务+关闭 mock 证明不依赖解析服务。
 
-## 真实 Docling 接入验证
+### 选文与内容块翻译（Issue #8）
 
-非自动化层，验收时以真实服务执行（脚本已入库：仓库根目录运行 `node scripts/verify-real-docling.mjs`，结果记录见 PR 描述）。脚本退出清理自证（Windows）：启动即以 `READEVA_VERIFY_PYTHON`（默认环境内 python.exe，绕过 conda 包装层）直连 docling，成功与异常退出路径均用 `taskkill /PID <pid> /T /F` 杀整棵进程树、等待子进程 exit（8s 超时）并探测 5001/8899 健康端口已不可达，防止 uvicorn 孙进程（~2GB）残留；端口仍可达时打警告（可能是外部遗留进程）：
+文件：`tests/e2e/translation-api.spec.js`（服务级）+ `tests/e2e/translation-browser.spec.js`（浏览器级）。按父规格，日常自动化使用**固定 mock MiniMax 翻译响应**（`tests/helpers/mock-minimax.js` 实现 MiniMax 中国站 OpenAI 兼容线协议 `POST /v1/chat/completions` 的 HTTP mock，返回确定性固定译文，可运行时注入失败/延迟并检查调用记录；服务以 `READEVA_MINIMAX_BASE_URL` 指向 mock，密钥用测试值），**不依赖真实外部服务/密钥**；真实接入验证见下节。
+
+| # | 验收标准 | 用例与关键断言 |
+| --- | --- | --- |
+| 1 | 用户可在右侧主动翻译选文或整个内容块，默认中文 | 浏览器：块「翻译」按钮点击 → 译文渲染在对应块旁（标注来源「内容块」/「选文」、目标语言「→ 中文」、引擎 MiniMax-M3.1-Flash）；选文经工具条「翻译」→ 译文在包含选文的块旁；服务级：POST `{kind:'block'}`/`{kind:'selection'}` → 201，译文字段齐备（默认 `targetLanguage: 'zh'`），列表/表格按块结构提取源文本、图片块 400 |
+| 2 | 服务端调用 MiniMax 中国站 MiniMax-M3.1-Flash，密钥用指定环境变量，客户端不接收密钥 | mock 收到 `model=MiniMax-M3.1-Flash` + `Authorization: Bearer` 形态 + 待翻译文本；`/api/translate/service` 暴露 `{configured, model, defaultTargetLanguage}` 且不含密钥；翻译响应不含密钥值；未配置（显式置空 `MINIMAX_API_KEY`，兼容本机已设真实密钥的环境）→ 503 `{error:'translation service not configured'}` + 浏览器失败提示「翻译服务未配置…MINIMAX_API_KEY」 |
+| 3 | 译文绑定文档、页解析身份、来源及目标语言，显示在对应内容旁 | 译文记录绑定 documentId/parseId/page/sourceKind/blockId/sourceKey/targetLanguage（块 `block:<id>`；选文 `selection:<sha256>`，空白差异归一后同一键）；跨语言共存（同块 zh/en 各自保存与复用）；浏览器断言译文元素紧跟来源块（块后/包含选文的块后），错误 parseId/跨页/未解析页 409 |
+| 4 | 翻译完成自动保存，重新打开恢复，已有对应译文直接复用 | 落盘 `translations/<docId>/<parseId>.json`；重启服务后 GET 恢复全部译文且解析/翻译零调用；重复请求 200 `{reused:true}` 零上游调用；浏览器：重复点击直接展示已有译文零调用、重开文档恢复 + 「已有译文」chip（`data-reused=true`）、重启服务后新会话恢复；在途去重（并发同键仅一次上游调用） |
+| 5 | 请求中与失败状态可见，失败不写入成功译文 | 浏览器：mock 延迟下请求中元素可见（「翻译中…」）→ 完成替换；mock 失败 → 错误元素可见（含原因）→ 重开文档无残留（服务端零写入）→ 恢复后重试成功；服务级：失败 502 明确反馈、GET 不含该来源、重试 201；解析替换防污染：慢翻译在途 → 外部删记录+换 DoclingDocument 重解析 → 新 parseId，旧响应 409 `page parse replaced during translation`，新解析零写入（无新译文文件） |
+| 6 | 模拟翻译响应测试保存与复用；真实 MiniMax 接入验证 | 模拟层：上全部用例基于 mock 固定译文与可控失败/延迟；真实层：`node scripts/verify-real-minimax.mjs`（中国站 `api.minimax.cn` + MiniMax-M3.1-Flash 真实调用，指定 PDF 代表页，块+选文真实译文、复用与重启恢复、浏览器真实链路截图留档，退出杀树自证端口释放），结果记录见 PR |
+
+补充用例：「参数校验」（缺 parseId/非法来源/空选文/超长选文/块不存在/缺块 id/非法语言码 400，未知文档 404，非法页码 400）、「目标语言绑定」、「列表/表格/图片块的源文本提取语义」。既有 88 用例全量回归（Issue #8 新增按钮/译文元素不改变既有块结构与联动行为）。
+
+## 真实 Docling 与 MiniMax 接入验证
+
+非自动化层，验收时以真实服务执行。**Docling**（脚本已入库：仓库根目录运行 `node scripts/verify-real-docling.mjs`，结果记录见 PR 描述）。**MiniMax（Issue #8）**：`node scripts/verify-real-minimax.mjs`（需环境变量 `MINIMAX_API_KEY`——中国站密钥；脚本以默认中国站地址 `https://api.minimax.cn/v1`、固定模型 MiniMax-M3.1-Flash 真实调用，导入指定 PDF 解析代表页，真实翻译块+选文、验证复用与重启恢复、浏览器真实链路截图留档 `.tmp/real-minimax-panel.png`；退出时 `taskkill /PID <pid> /T /F` 杀整棵进程树、探测 5001/8899 健康端口已不可达，无残留进程）。脚本不打印、不落盘密钥。结果记录见 PR 描述。脚本退出清理自证（Windows）：启动即以 `READEVA_VERIFY_PYTHON`（默认环境内 python.exe，绕过 conda 包装层）直连 docling，成功与异常退出路径均用 `taskkill /PID <pid> /T /F` 杀整棵进程树、等待子进程 exit（8s 超时）并探测 5001/8899 健康端口已不可达，防止 uvicorn 孙进程（~2GB）残留；端口仍可达时打警告（可能是外部遗留进程）：
 
 1. 启动解析服务：`conda run -n readeva python -m uvicorn docling_service.main:app --host 127.0.0.1 --port 5001`（conda 环境 `readeva`，docling 2.153.0）。
 2. 启动 Readeva 服务：`npm start -- --docling-url http://127.0.0.1:5001`。

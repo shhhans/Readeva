@@ -96,3 +96,25 @@ export async function fetchDictionaryLookup(word) {
   const query = new URLSearchParams({ word });
   return request(`/api/dictionary/lookup?${query.toString()}`);
 }
+
+/* ---------------- 选文与内容块翻译：MiniMax（Issue #8） ---------------- */
+
+/** 翻译服务可用性：{ configured, model, defaultTargetLanguage }（不含地址/密钥）。 */
+export const fetchTranslateService = () => request('/api/translate/service');
+
+/** 当前页解析绑定的全部译文（重开恢复/复用的数据源）。 */
+export const fetchPageTranslations = (id, page) =>
+  request(`/api/documents/${id}/pages/${page}/translations`);
+
+/**
+ * 翻译请求（用户主动触发）：source 为 { kind:'block', blockId } 或
+ * { kind:'selection', text }；默认目标语言中文（服务端同默认）。命中既有译文时
+ * 响应 reused:true；新翻译 201；解析已替换 409；翻译失败 502（不落盘）。
+ */
+export function requestTranslation(id, page, { parseId, source, targetLanguage }) {
+  return request(`/api/documents/${id}/pages/${page}/translations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ parseId, source, targetLanguage }),
+  });
+}
