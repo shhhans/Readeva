@@ -68,3 +68,16 @@ export const fetchParseResult = (id, page) =>
 
 export const requestPageParse = (id, page) =>
   request(`/api/documents/${id}/pages/${page}/parse`, { method: 'POST' });
+
+/* ---------------- 按阅读位置调度（Issue #5） ---------------- */
+
+/** 上报阅读位置：服务端按「当前页及后续页优先，其余降级」重排未开始任务。 */
+export const updateReadingPosition = (id, page) =>
+  request(`/api/documents/${id}/reading-position`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ page }),
+  });
+
+/** 整本解析进度：逐页状态 + 整体计数 + 失败原因。 */
+export const fetchParseProgress = (id) => request(`/api/documents/${id}/parse/progress`);

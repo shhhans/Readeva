@@ -7,6 +7,7 @@ import {
   pdfFileUrl,
   getServiceBase,
   setServiceBase,
+  updateReadingPosition,
 } from './api.js';
 import { PdfViewer } from './pdf-viewer.js';
 import { ParsePanel } from './parse-panel.js';
@@ -233,6 +234,8 @@ async function showReader(docId) {
     $('#page-total').textContent = String(doc.pageCount);
 
     const { progress } = await fetchProgress(docId);
+    // 上报阅读位置：服务端按「当前页及后续页优先，其余降级」调度整本解析（Issue #5）。
+    updateReadingPosition(docId, progress.page).catch(() => {});
 
     const viewer = new PdfViewer({ canvas: $('#pdf-canvas'), container: $('#viewer') });
     state.viewer = viewer;
@@ -262,6 +265,8 @@ async function applyViewerAction(action) {
   // 翻页后右侧面板跟随当前页；缩放不改页码，不重新加载解析。
   if (result.page !== previousPage) {
     state.parsePanel.showPage(state.docId, result.page);
+    // 阅读位置变化 → 服务端重排未开始任务优先级（Issue #5）。
+    updateReadingPosition(state.docId, result.page).catch(() => {});
   }
 }
 

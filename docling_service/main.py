@@ -47,8 +47,9 @@ _CONVERTER = DocumentConverter(
     }
 )
 
-# 解析是 CPU 重活；单线程串行即可（当前页解析一次一页）。
-_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="docling")
+# 解析是 CPU 重活；线程池并发 2 与 Readeva 服务端默认并发（READEVA_PARSE_CONCURRENCY）
+# 对齐：同一进程共享已加载模型，内存不翻倍、CPU 翻倍；本机 2GB pagefile 下 2 是稳妥上限。
+_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="docling")
 
 
 @dataclass

@@ -82,6 +82,77 @@ function capture(proc, sink) {
 
 const children = [];
 
+// 清理自证：记录本脚本启动的健康端口（docling /health、readeva /api/health），
+// 退出前探测应已不可达（仍可达时区分警告：可能是外部遗留进程）。
+const cleanupPorts = new Map();
+
+function trackPort(port, path) {
+  cleanupPorts.set(port, path);
+}
+
+/**
+ * Windows 下杀整棵进程树（taskkill /T /F）：docling 若经 conda run 包装层启动，
+ * 只 child.kill() 直接子进程会残留 uvicorn 孙进程（~2GB）；Linux/macOS 退回 kill()。
+ * 本脚本默认已直连环境 python.exe（READEVA_VERIFY_PYTHON）绕过包装层，但保留树杀
+ * 兜底，确保任何包装方式下退出后无残留。
+ */
+function killTree(proc) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  try {
+    if (process.platform === 'win32' && proc.pid) {
+      spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
+    }
+    proc.kill();
+  } catch {
+    /* 进程已退出 */
+  }
+}
+
+/** 树杀并等待进程退出（8s 超时）；未退出返回 false（残留）。 */
+async function killAndWait(child, label) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return true;
+  const exited = new Promise((resolve) => child.once('exit', () => resolve(true)));
+  killTree(child);
+  const ok = await Promise.race([exited, delay(8000).then(() => false)]);
+  if (!ok) {
+    log(`WARNING: ${label} (pid=${child.pid}) 8 秒后仍未退出，可能残留进程`);
+  }
+  return ok;
+}
+
+/** 探测健康端口已不可达；超时仍可达返回 false（可能为外部遗留进程）。 */
+async function waitPortReleased(port, path, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      signal: AbortSignal.timeout(1200),
+    }).catch(() => null);
+    if (!res?.ok) return true;
+    if (Date.now() > deadline) return false;
+    await delay(300);
+  }
+}
+
+/** 退出清理（成功与异常路径共用）：杀树 → 等退出 → 端口释放自证。 */
+async function cleanup(label) {
+  log(`cleanup(${label})：树杀 ${children.length} 个子进程并等待退出…`);
+  const results = [];
+  for (const [index, child] of children.entries()) {
+    results.push(await killAndWait(child, `子进程 #${index + 1}`));
+  }
+  for (const [port, path] of cleanupPorts.entries()) {
+    const released = await waitPortReleased(port, path);
+    if (released) {
+      log(`cleanup: 端口 ${port} 已释放`);
+    } else {
+      log(
+        `WARNING: 端口 ${port} 仍可达——若非本脚本子进程残留，则可能是外部遗留进程（可用 taskkill /PID <pid> /T /F 清理）`,
+      );
+    }
+  }
+  return results.every(Boolean);
+}
+
 async function main() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'readeva-real-'));
   log('data dir:', dataDir);
@@ -94,6 +165,7 @@ async function main() {
     { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] },
   );
   children.push(docling);
+  trackPort(DOCLING_PORT, '/health');
   capture(docling, doclingSink);
   await waitUntil(async () => {
     const res = await fetch(`http://127.0.0.1:${DOCLING_PORT}/health`).catch(() => null);
@@ -116,6 +188,7 @@ async function main() {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       children.push(proc);
+      trackPort(READEVA_PORT, '/api/health');
       capture(proc, sink);
       const exitedEarly = new Promise((resolve) => proc.once('exit', (code) => resolve(code)));
       const winner = await Promise.race([
@@ -188,7 +261,8 @@ async function main() {
   }
 
   // 5. restart Readeva service → 已完成页直接恢复，不重新解析
-  readeva.proc.kill();
+  // 旧实例先树杀并等退出（防残留/端口竞态），再起新实例。
+  await killAndWait(readeva.proc, 'readeva（重启前旧实例）');
   await delay(1500);
   readeva = await startReadeva();
   base = readeva.base;
@@ -250,12 +324,16 @@ async function main() {
   await browser.close();
 
   log('REAL DOCLING VERIFICATION PASSED');
-  for (const child of children) child.kill();
+  const cleaned = await cleanup('success');
+  if (!cleaned) {
+    console.error('[verify] FAILED: 子进程未全部退出（可能残留进程），请检查端口与进程表');
+    process.exit(1);
+  }
   process.exit(0);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('[verify] FAILED:', err.message);
-  for (const child of children) child.kill();
+  await cleanup('failure');
   process.exit(1);
 });

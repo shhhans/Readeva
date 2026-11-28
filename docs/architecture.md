@@ -57,13 +57,32 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 | GET | `/api/documents/:id/progress` | 阅读位置 `{ page, zoom, updatedAt }`（无记录时默认第 1 页、100%） |
 | PUT | `/api/documents/:id/progress` | 保存阅读位置；页码按 PDF 页数钳制，缩放钳制到 [0.25, 5] |
 | GET | `/api/parse/service` | 解析服务可用性 `{ configured, engine }`（不含地址/密钥） |
-| POST | `/api/documents/:id/pages/:page/parse` | **页解析请求**（幂等）：未开始 → 202 后台解析；进行中 → 200；已完成 → 200 `{ reused: true }` 复用不重新解析；未配置解析服务 → 503 |
-| GET | `/api/documents/:id/pages/:page/parse` | **任务状态**：`idle`（未开始）/ `running`（已开始）/ `succeeded`（含 `parseId`）/ `failed`（含 `error`） |
+| POST | `/api/documents/:id/pages/:page/parse` | **页解析请求**（幂等，兼作失败页显式重试）：未开始 → 202 后台解析；并发占满 → 202 `{status:"queued"}` 排队且置于队首；进行中 → 200；已完成 → 200 `{ reused: true }` 复用不重新解析；未配置解析服务 → 503 |
+| GET | `/api/documents/:id/pages/:page/parse` | **任务状态**：`idle`（未开始）/ `queued`（已接受、队列中）/ `running`（已开始）/ `succeeded`（含 `parseId`）/ `failed`（含 `error`） |
 | GET | `/api/documents/:id/pages/:page/parse/result` | **结果获取**：按页返回 `{ parse: { parseId, blocks, meta } }`；仅成功后可得，否则 404 |
+| PUT | `/api/documents/:id/reading-position` | **阅读页优先级更新**（Issue #5）：`{ page }` → 服务端按「当前页及后续页优先，其余降级」重排未开始任务（显式请求置顶的页不降级），返回调度后的整本进度快照；未配置解析服务时 `{ scheduled: false }` |
+| GET | `/api/documents/:id/parse/progress` | **整本解析进度**（Issue #5）：逐页状态（idle/queued/running/succeeded/failed + `queuePosition` + 失败原因）+ 计数（succeeded/failed/running/queued/idle、total）；基于轻量状态索引构建（B1：不逐轮读盘解析内容块），服务重启后进度不丢 |
 
 错误返回 `{ error }`；非 PDF 导入返回 400；未知文档返回 404；非法页码返回 400。
 
 解析任务在服务端后台执行（`server/page-tasks.js`）：抽取单页字节流（pdf-lib，固定元数据保证字节确定）→ 提交解析服务 → 轮询状态 → 取结果 → 规范化 → 自动持久保存（成功与失败都落盘）。服务重启丢失的进行中任务回落为「未开始」，已完成页永远从磁盘取回。
+
+## 按阅读位置的解析调度（Issue #5）
+
+`server/page-tasks.js` 的 `ParseTaskManager` 在单页编排之上维护**按文档的未开始任务优先队列**（内存态；已开始/成功/失败状态仍以 parse-store 落盘记录为唯一状态源，不另存一份）：
+
+- **优先级规则**：`PUT /api/documents/:id/reading-position` 上报阅读位置后，未开始任务按「当前页 → 后续页 → 前置页」升序重排；跳页只重排未开始任务，进行中的页不取消、不重复启动。
+- **队列成员**：仅收未开始（无落盘记录且未运行）的页；已完成页从队列摘除、复用结果；**失败页不入自动队列、不自动重试**——标记失败、不阻塞队列，仅通过显式解析请求（`POST …/parse`）重试，成功后由 `saveResult` 替换失败记录。用户视角：整本补全会停在「解析 x/y · 失败 n」（面板头部静态文本，**失败只计数**、不列页码），失败页保持可见可重试。
+- **派发**：全局并发上限可配置（`--parse-concurrency` / `READEVA_PARSE_CONCURRENCY`，默认 2，与 docling_service 线程池 `max_workers=2` 对齐——同进程共享已加载模型，内存不翻倍、CPU 翻倍；跨文档共享；本机 2GB pagefile 下 2 是稳妥上限）；任务结束（成功或失败）后继续派发队列下一页——队列按序补全其余未解析页（闲置补全）。跳页插队为 staggered 语义：新页插入队首，任一并发槽释放即开始，不做「保留空槽」，平均跳页等待约为串行的一半。
+- **开局填充**：每次扫全会话（文档打开/首次阅读位置上报）立即填满所有并发槽（并发 2 → 两页同时开始，不做 pacing）；pacing 只作用于后续背景派发。会话在队列排空且无运行中任务时结束，下次上报重新授予。
+- **动态 pacing（默认）**：连续背景派发之间的间隔 = 最近 3 页转换耗时（派发→succeeded/failed，不含排队）均值 × `--parse-sweep-pacing-factor` / `READEVA_PARSE_SWEEP_PACING_FACTOR`（默认 0.5），钳制 [0, 5000]ms——设备快→间隔小吞吐高，设备慢→间隔大留 CPU 给阅读交互（系数 >0.5 时并发 2 下出现 CPU 空隙）。**代价与边界**：pacing 默认开启，稳态整本补全吞吐低于「不节流」（单页耗时 T 时约 1.5T/页）；**当前页（非 pinned）同样受 pacing 约束**，翻页后最多可能等待一个 pacing 间隔（上限 5s）；系数传 0/非法值会回落默认 0.5（当前无「完全关闭」档，需固定节流时用 `READEVA_PARSE_SWEEP_DELAY_MS`）。pacing 状态目前是服务级全局（`sweepTimer`/`lastSweepDispatchAt`/耗时样本），队列则按文档隔离——多文档并行时耗时样本互相污染，待后续按 docId 分桶。
+- **固定节流覆盖（可选）**：`--parse-sweep-delay-ms` / `READEVA_PARSE_SWEEP_DELAY_MS` 设 >0 时以固定间隔覆盖动态 pacing。显式请求/置顶页在两种模式下均不受限（等待期间任务留在队首、不占并发槽）。
+- **显式请求插队**：`POST …/pages/:page/parse` 将目标页置于队首并标记置顶（pinned）：随后的阅读位置重排不会把显式请求/重试的页降级；页离开队列（开始执行或复用跳过）即消耗置顶标记。
+- **进度查询**：`GET /api/documents/:id/parse/progress` 返回逐页状态（含队列位置与失败原因）与计数（succeeded/total + failed/running/queued/idle）；已完成/失败页以落盘记录的轻量状态索引为准，服务重启后进度不丢。
+- **轻量状态索引（B1）**：进度快照、优先级重排与单页状态查询经 `parse-store.getStatus()` 只读状态字段（status/parseId/error/updatedAt），按 mtime+size 命中缓存、写路径主动失效——不逐轮全量读盘解析内容块（实测 215 页 × ~660KB/页 从每轮 ~139MB 读盘 / ~0.3s 同步阻塞降至每轮仅 stat）；内容块仅在 `GET …/parse/result` 时读取。
+- **触发边界与自愈**：整本调度仅由阅读位置更新触发（客户端打开文档/翻页时上报）；单独的页解析请求不触发整本调度（Issue #3 行为保持）。客户端退出宽限期与重连重新调度属 Issue #6，本阶段队列一旦建立即运行至完成；作为低成本兑底，面板在事件式刷新整体进度快照时发现「无 queued/running 且仍有 idle 页」（如服务重启导致内存队列丢失）会自动重报阅读位置恢复调度（带冷却）。
+- **前端呈现（收敛轮）**：右侧面板**不再有独立进度区**（逐页状态芯片已彻底移除）。单页解析状态、失败原因与显式重试**内联在内容列表**（状态徽标 + 失败原因 + 重试按钮）；整本进度只有**面板头部一处静态文本**（如「解析 12/215 · 失败 1」），在事件（派发/完成/失败/重试/翻页）时取一次快照更新，**阅读视图打开期间另以固定 8s 间隔慢刷新**（离开阅读视图即停止定时器；不引入秒级轮询、不重建逐页芯片）；未配置解析服务时界面无任何进度残留（仅一行静态提示）。
+- **头部进度刷新与失败页取舍**：慢刷新只取整本快照并更新头部文本，**不触发自愈重排**（自愈仍由事件式刷新驱动，调度语义不变）；每次快照（事件式或慢刷新）后都重新计时 → 相邻两次快照间隔 ≥ 8s（事件刚刷新过不会紧接着重复取数），避免头部文本长期过期。**失败页只计数**：头部不列出失败页码列表（逐页失败详情可查 `GET …/parse/progress` 的 `pages[]`），失败详情在对应页的内容列表内联条目里（状态徽标 + 失败原因 + 显式重试按钮）——取舍理由：头部保持单行静态文本，不引入逐页芯片/可展开列表，避免重建 DOM 与滚动干扰阅读。
 
 ## 双向联动（Issue #4）
 
@@ -78,5 +97,5 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 
 ## 后续扩展边界（本任务不实现）
 
-- **页解析调度（Issue #5）**：当前页及后续页优先、跳页重排优先级、闲置补全剩余页、失败隔离与显式重试、客户端退出宽限期与重连重新调度；任务状态机与持久化基础已在本任务就位。
+- **客户端退出宽限期与重连重新调度（Issue #6）**：客户端退出/连接失效后完成已开始页并清除未开始排队、重连取回结果并重新调度；调度与持久化基础已在本任务就位。
 - **查词翻译、成果包导入导出**：译文将绑定「文档 + 页解析身份（parseId）」；成果包可从 `parses/` + `progress/` + 文档身份组成一致快照。
