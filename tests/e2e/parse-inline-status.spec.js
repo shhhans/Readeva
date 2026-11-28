@@ -9,10 +9,10 @@ const FIXTURE_B = path.resolve('tests/fixtures/sample-b.pdf');
 
 // 浏览器级用例覆盖 PR #15 收敛轮（完全移除进度区）后的验收契约：
 // - 单页解析状态、失败原因、显式重试改为内容列表内联呈现；
-// - 整体进度改为面板头部一处静态文本，仅在事件（派发/完成/失败/重试）时更新，
-//   不做定时轮询重建；
+// - 整体进度为面板头部一处静态文本：事件（派发/完成/失败/重试）时更新，
+//   阅读视图打开期间另以固定 8s 间隔慢刷新（不做秒级轮询重建）；
 // - 进度区（页码芯片）彻底移除；未配置解析服务时界面无任何进度残留。
-// 串行：同一服务进程上按顺序验证内联状态 → 失败重试 → 事件式更新 → 自愈。
+// 串行：同一服务进程上按顺序验证内联状态 → 失败重试 → 事件式更新 + 慢刷新 → 自愈。
 test.describe.configure({ mode: 'serial' });
 
 let mock;
@@ -128,7 +128,9 @@ test('失败原因与显式重试内联呈现：条目带状态徽标与重试�
   }
 });
 
-test('整体进度为头部静态文本：仅事件更新，空闲期无整本进度轮询请求', async ({ page, request }) => {
+test('整体进度为头部静态文本：事件更新 + 阅读期间慢刷新（无秒级轮询）', async ({ page, request }) => {
+  // 本用例含两段定时等待（慢刷新间隔断言 + 离开阅读视图后停止），放宽用例超时。
+  test.setTimeout(120_000);
   const progressCalls = [];
   page.on('request', (req) => {
     if (req.url().includes('/parse/progress')) progressCalls.push(Date.now());
@@ -149,12 +151,8 @@ test('整体进度为头部静态文本：仅事件更新，空闲期无整本�
     .poll(async () => (await progressSnapshot(request, docId)).succeeded, { timeout: 30000 })
     .toBe(8);
 
-  // 空闲期不再产生整本进度请求：没有每秒轮询、也不重建任何进度区。
-  const before = progressCalls.length;
-  await page.waitForTimeout(3000);
-  expect(progressCalls.length).toBe(before);
-
   // 事件（翻页）触发一次刷新：静态文本更新为真实计数。
+  const before = progressCalls.length;
   const callsBefore = mock.convertCalls();
   await page.fill('#page-input', '2');
   await page.press('#page-input', 'Enter');
@@ -163,6 +161,29 @@ test('整体进度为头部静态文本：仅事件更新，空闲期无整本�
   expect(progressCalls.length).toBeGreaterThan(before);
   // 已完成页直接复用：翻到已解析页不触发新的转换。
   expect(mock.convertCalls()).toBe(callsBefore);
+
+  // 慢刷新：阅读视图打开期间按固定间隔（8s）取一次整本快照。
+  // 锚点 = 最近一次整本快照请求的时刻（此刻起进入空闲期）。
+  const anchorAt = progressCalls[progressCalls.length - 1];
+  expect(anchorAt).toBeGreaterThan(0);
+
+  await page.waitForTimeout(12_000);
+  const idleCalls = progressCalls.filter((t) => t > anchorAt && t <= anchorAt + 12_000);
+
+  // 空闲 3s 内没有整本进度请求：慢刷新间隔 8s，既不秒级轮询也不紧接事件重复取数。
+  expect(idleCalls.filter((t) => t <= anchorAt + 3_000).length).toBe(0);
+  // 空闲 12s 内恰一次慢刷新，且间隔落在 5–10s（常量 8s）。
+  expect(idleCalls.length).toBe(1);
+  const gap = idleCalls[0] - anchorAt;
+  expect(gap).toBeGreaterThanOrEqual(5_000);
+  expect(gap).toBeLessThanOrEqual(10_000);
+
+  // 离开阅读视图：慢刷新立即停止（不再取整本快照，定时器不泄漏）。
+  await page.click('#back-button');
+  await expect(page.locator('#view-library')).toBeVisible();
+  const afterLeave = progressCalls.length;
+  await page.waitForTimeout(9_500);
+  expect(progressCalls.length).toBe(afterLeave);
 });
 
 test('事件驱动自愈：队列丢失且仍有未开始页时自动重报阅读位置恢复调度', async ({ page, request }) => {

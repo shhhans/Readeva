@@ -11,6 +11,11 @@ const POLL_INTERVAL_MS = 500;
 const POLL_MAX_MS = 10 * 60 * 1000;
 /** 自愈重报阅读位置的冷却时间（避免无队列可建时重复请求）。 */
 const SELF_HEAL_COOLDOWN_MS = 10_000;
+/**
+ * 整体进度慢刷新间隔（毫秒）：阅读视图打开期间的兜底快照刷新。
+ * 取 8s（落在 5–10s 区间）：既能让头部文本跟上后台补全，又不会退化成秒级轮询。
+ */
+const SUMMARY_SLOW_REFRESH_MS = 8_000;
 
 /** 内容块列表变化事件：联动层据此重建原页覆盖框（Issue #4）。 */
 export const BLOCKS_CHANGED_EVENT = 'parse-blocks-changed';
@@ -30,8 +35,9 @@ const STATE_LABELS = {
  * - 原页立即打开，面板独立异步加载，不阻塞阅读；
  * - 单页状态内联在内容列表里（未开始/排队中/解析中/已完成/解析失败）；
  *   失败条目带状态徽标、失败原因与显式重试按钮；
- * - 整体进度只有面板头部一处静态文本，仅在事件（派发/完成/失败/重试/翻页）时
- *   取一次快照更新——不做定时轮询、不重建页码芯片；
+ * - 整体进度只有面板头部一处静态文本：事件（派发/完成/失败/重试/翻页）时取一次
+ *   快照更新，阅读视图打开期间另以固定 8s 间隔慢刷新一次（离开阅读视图即停止，
+ *   不做秒级轮询、不重建页码芯片）；
  * - 按阅读顺序渲染标题、段落、列表、表格与图片资源；缺少位置的块照常展示；
  * - 服务端已持久化的页直接取回结果，不重新解析。
  */
@@ -50,6 +56,7 @@ export class ParsePanel {
     this.pollTimer = 0;
     this.pollDeadline = 0;
     this.summaryTimer = 0;
+    this.summarySlowTimer = 0;
     this.stateKey = '';
     this.lastSelfHealAt = 0;
   }
@@ -131,6 +138,8 @@ export class ParsePanel {
     this.pollTimer = 0;
     clearTimeout(this.summaryTimer);
     this.summaryTimer = 0;
+    // 离开阅读视图：停止慢刷新（头部快照不再取数）。
+    this.stopSlowSummary();
     this.hideSummary();
     this.lastSelfHealAt = 0;
     this.docId = null;
@@ -185,6 +194,8 @@ export class ParsePanel {
     if (!this.stateKey) this.setState('idle');
     // 事件式刷新整体进度（打开/翻页等事件后取一次快照，不轮询）。
     this.refreshSummary();
+    // 阅读视图打开期间开启慢刷新（固定 8s 间隔），离开阅读视图即停止。
+    this.scheduleSlowSummary();
     await this.refreshStatus(generation, { startIfIdle: true });
   }
 
@@ -295,10 +306,12 @@ export class ParsePanel {
 
   /**
    * 事件式刷新整体进度：仅在派发/完成/失败/重试/翻页等事件后取一次快照。
-   * 没有定时轮询，也不重建任何页码列表（面板头部只有一处静态文本）。
+   * 没有秒级轮询，也不重建任何页码列表（面板头部只有一处静态文本）。
    */
   refreshSummary() {
     if (!this.docId || this.serviceConfigured !== true) return;
+    // 事件刚取过快照 → 慢刷新重新计时，避免事件后紧接着重复取数。
+    this.scheduleSlowSummary();
     if (this.summaryTimer) return; // 同一批事件合并为一次刷新
     this.summaryTimer = setTimeout(() => {
       this.summaryTimer = 0;
@@ -327,6 +340,48 @@ export class ParsePanel {
         updateReadingPosition(this.docId, this.page).catch(() => {});
       }
     }
+  }
+
+  /* ---------------- 整体进度慢刷新（阅读期间定时快照） ---------------- */
+
+  /**
+   * 安排下一次慢刷新（幂等）：仅在阅读视图打开且解析服务已配置时运行。
+   * 每次快照（事件式或慢刷新）后都重新计时 → 相邻两次快照间隔 ≥ 8s，
+   * 既不会退化成秒级轮询，也不会在事件后紧接着重复取数。
+   */
+  scheduleSlowSummary() {
+    clearTimeout(this.summarySlowTimer);
+    this.summarySlowTimer = 0;
+    if (this.serviceConfigured !== true || !this.docId) return;
+    this.summarySlowTimer = setTimeout(() => {
+      this.summarySlowTimer = 0;
+      this.slowRefreshSummary().catch(() => {});
+    }, SUMMARY_SLOW_REFRESH_MS);
+  }
+
+  /** 停止慢刷新（离开阅读视图 / 面板重置）。 */
+  stopSlowSummary() {
+    clearTimeout(this.summarySlowTimer);
+    this.summarySlowTimer = 0;
+  }
+
+  /**
+   * 慢刷新一次整本快照：只更新头部静态文本。
+   * 不做自愈重排（自愈仍由事件式刷新驱动，调度语义不变）。
+   */
+  async slowRefreshSummary() {
+    const generation = this.generation;
+    if (generation !== this.generation) return;
+    if (this.serviceConfigured !== true || !this.docId) return;
+    try {
+      const snapshot = await fetchParseProgress(this.docId);
+      if (generation !== this.generation) return;
+      this.applySummary(snapshot);
+    } catch {
+      /* 服务不可达/重启中：保持当前文本 */
+    }
+    // 阅读视图仍在且服务已配置 → 继续下一轮慢刷新。
+    this.scheduleSlowSummary();
   }
 
   /** 整体进度静态文本（如「解析 12/215 · 失败 1」）。 */
