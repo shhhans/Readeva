@@ -5,6 +5,7 @@ import { Library, InvalidPdfError } from './library.js';
 import { DoclingAdapter } from './docling.js';
 import { ParseStore } from './parse-store.js';
 import { ParseTaskManager, buildParseProgress } from './page-tasks.js';
+import { DictionaryStore, DictionaryNotPreparedError, normalizeLookupKey } from './dictionary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -16,15 +17,15 @@ function parseArg(argv, flag) {
   return undefined;
 }
 
+const dataDirOption =
+  parseArg(process.argv, '--data-dir') ?? process.env.READEVA_DATA_DIR ?? path.join(repoRoot, 'data');
+
 const config = {
   host: parseArg(process.argv, '--host') ?? process.env.READEVA_HOST ?? '127.0.0.1',
   port: Number(
     parseArg(process.argv, '--port') ?? process.env.READEVA_PORT ?? 8787,
   ),
-  dataDir:
-    parseArg(process.argv, '--data-dir') ??
-    process.env.READEVA_DATA_DIR ??
-    path.join(repoRoot, 'data'),
+  dataDir: dataDirOption,
   // Docling 解析服务地址（服务端配置，客户端不接触解析服务地址与密钥）。
   doclingUrl:
     parseArg(process.argv, '--docling-url') ?? process.env.READEVA_DOCLING_URL ?? '',
@@ -68,6 +69,11 @@ const config = {
       process.env.READEVA_CLIENT_GRACE_MS ??
       300000,
   ),
+  // ECDICT 离线词典目录（Issue #7）：构建产物所在目录（scripts/build-dictionary.mjs 产出）。
+  ecdictDir:
+    parseArg(process.argv, '--ecdict-dir') ??
+    process.env.READEVA_ECDICT_DIR ??
+    path.join(dataDirOption, 'dict', 'ecdict'),
 };
 
 if (!Number.isFinite(config.port) || config.port < 0 || config.port > 65535) {
@@ -353,6 +359,34 @@ app.get('/api/documents/:id/parse/progress', (req, res) => {
   res.json(progress);
 });
 
+/* ---------------- 选词查词：ECDICT 离线词典（Issue #7） ---------------- */
+
+const dictionaryStore = new DictionaryStore(config.ecdictDir);
+
+// 词条查询：200 { entry } / 404 未收录 / 503 词典数据未准备 / 400 非法参数。
+// 纯本地查询（内存索引 + 文件切片），不访问网络；首版不维护查词历史。
+app.get('/api/dictionary/lookup', async (req, res, next) => {
+  try {
+    const key = normalizeLookupKey(req.query.word);
+    if (!key) {
+      return res.status(400).json({ error: 'word query parameter is required' });
+    }
+    let entry;
+    try {
+      entry = await dictionaryStore.lookup(key);
+    } catch (err) {
+      if (err instanceof DictionaryNotPreparedError) {
+        return res.status(503).json({ error: 'dictionary data not prepared' });
+      }
+      throw err;
+    }
+    if (!entry) return res.status(404).json({ error: 'entry not found' });
+    res.json({ entry });
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.use('/api', (req, res) => {
   res.status(404).json({ error: 'not found' });
 });
@@ -378,6 +412,7 @@ const server = app.listen(config.port, config.host, () => {
   console.log(
     `Readeva docling service: ${doclingAdapter ? config.doclingUrl : 'not configured'}`,
   );
+  console.log(`Readeva dictionary dir: ${config.ecdictDir}`);
 });
 
 server.on('error', (err) => {

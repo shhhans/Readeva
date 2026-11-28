@@ -63,6 +63,7 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 | PUT | `/api/documents/:id/reading-position` | **阅读页优先级更新**（Issue #5）：`{ page }` → 服务端按「当前页及后续页优先，其余降级」重排未开始任务（显式请求置顶的页不降级），返回调度后的整本进度快照；未配置解析服务时 `{ scheduled: false }` |
 | GET | `/api/documents/:id/parse/progress` | **整本解析进度**（Issue #5）：逐页状态（idle/queued/running/succeeded/failed + `queuePosition` + 失败原因）+ 计数（succeeded/failed/running/queued/idle、total）；基于轻量状态索引构建（B1：不逐轮读盘解析内容块），服务重启后进度不丢。**进度轮询同时作为客户端会话心跳**（Issue #6） |
 | GET | `/api/documents/:id/session` | **客户端会话状态**（Issue #6）：`{ documentId, supported, lastSeen, graceMs, expired }`；**只读观察端点，不刷新 lastSeen**（测试/诊断用）；未配置解析服务时 `{ supported: false }` |
+| GET | `/api/dictionary/lookup?word=…` | **选词查词**（Issue #7）：ECDICT 离线英汉词条查询；200 `{ entry }`（词条/音标/中英释义/词性/柯林斯/牛津/考试标签/词频/词形变化）；未收录 404 `{error:"entry not found"}`；词典数据未准备 503；非法参数（缺 word/仅空白/超长）400 |
 
 错误返回 `{ error }`；非 PDF 导入返回 400；未知文档返回 404；非法页码返回 400。
 
@@ -112,6 +113,17 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
   - **状态缓存随文档清理**：`ParseStore.pruneStatusCache` 在会话周期检查时剔除已不在书库中的文档缓存条目（statusCache/indexCache/lastSeen），与文档删除能力联动（删除未实现时保证缓存不无界增长）。
   - **冷启动状态索引（index.json）**：每文档 `parses/<sha>/index.json` 保存状态字段（status/parseId/error/updatedAt）+ 页文件 mtime/size 快照，保存路径按文档串行链增量更新（避免并发读-改-写丢条目）；`getStatus` 冷启动（内存缓存空）时先经索引取状态，**消除重启后首轮逐页读全量记录**（原 B1 首轮成本）；索引缺失/损坏（如测试直接落盘页记录）或条目与页文件 stat 不匹配（页文件被外部改动/删除）时回退逐页读盘，**正确性不依赖索引**（索引只是加速器）。
 
+## 选词查词与 ECDICT 离线词典（Issue #7）
+
+右侧解析原文选词 → ECDICT 离线英汉查询，交付「界面 → 服务 → 存储 → 测试」贯通的可演示行为：
+
+- **数据准备（Hans 执行）**：`scripts/build-dictionary.mjs` 从 ECDICT 的 `ecdict.csv`（仓库单文件约 63MB）一次性构建到 `<数据目录>/dict/ecdict`（可用 `--ecdict-dir` / `READEVA_ECDICT_DIR` 覆盖）。产物 3 个文件：`ecdict.words.bin`（按小写键 UTF-8 字节序排序的内存索引，记录 `[keyLen u8][key][offset u32][length u32]`）、`ecdict.entries.jsonl`（每行一个词条 JSON，与索引同序）、`manifest.json`（来源、许可声明、统计，最后写入作完整性标记）。构建整体先写临时目录再原子换入，中断不残留半成品；同键（小写）去重保留首现词条；构建时把 ECDICT 字段内的字面 `\n` 行分隔符转换为真实换行（API 契约统一「以真实换行分行」）；`detail`（例句 JSON）与 `audio`（网络音频 URL）不入离线数据，保证断网可完整展示释义。
+- **服务端查询（`server/dictionary.js`）**：首次查询惰性加载索引（~15MB）到内存，查询 = 内存二分查找 + 一次词条文件切片读取，**不访问网络**；解析服务不可用时查词照常工作。词典文件缺失视为「未准备」而非致命错误：返回 503 并给出明确提示，数据构建好后无需重启即可恢复（加载失败会重试）。查询词归一化：NFC、弯引号/破折号折算、连续空白折叠（支持词组词条）、去首尾标点（保留词条实际存在的撇号/连字符，如 `'hood`、`-gate`）、小写；空/超长（>80 字符）返回 400。
+- **前端交互（`web/dictionary.js`）**：组件零耦合，监听 `#parse-content` 的选择（pointerup 后读取）与内容变化（`parse-blocks-changed`）事件；选中文本后浮现「查词」工具条（定位到选区上方，放不下时下方），点「查词」主动发起查询（不做自动弹窗）并消费选区（工具条不回弹）。结果停靠在面板底部卡片：词条、音标、考试标签芯片、中英释义（按行渲染）、词性占比、柯林斯星级/牛津核心/BNC 与词频序/词形变化；未收录、词典未准备、查询失败均明确反馈；卡片底部固定展示数据来源与许可（ECDICT · MIT License）。
+- **边界**：首版不维护查词历史（服务端不留存、浏览器不写本地存储）；原文/选文翻译属 Issue #8，工具条结构预留扩展位。
+
 ## 后续扩展边界（本任务不实现）
 
-- **查词翻译、成果包导入导出**：译文将绑定「文档 + 页解析身份（parseId）」；成果包可从 `parses/` + `progress/` + 文档身份组成一致快照。
+- **客户端退出宽限期与重连重新调度（Issue #6）**：客户端退出/连接失效后完成已开始页并清除未开始排队、重连取回结果并重新调度；调度与持久化基础已在本任务就位。
+- **查词翻译的翻译部分（Issue #8）**：译文将绑定「文档 + 页解析身份（parseId）」；选词与 ECDICT 查询已在本任务就位（工具条预留翻译入口扩展位）。
+- **成果包导入导出**：成果包可从 `parses/` + `progress/` + 文档身份组成一致快照。

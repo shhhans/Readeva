@@ -23,7 +23,10 @@ async function request(path, options = {}) {
     } catch {
       /* 非 JSON 响应时使用状态码 */
     }
-    throw new Error(`请求失败（${detail}）`);
+    const err = new Error(`请求失败（${detail}）`);
+    // 保留状态码供调用方分支处理（如查词：404 未收录 / 503 词典未准备）。
+    err.status = response.status;
+    throw err;
   }
   return response.json();
 }
@@ -81,3 +84,14 @@ export const updateReadingPosition = (id, page) =>
 
 /** 整本解析进度：逐页状态 + 整体计数 + 失败原因。 */
 export const fetchParseProgress = (id) => request(`/api/documents/${id}/parse/progress`);
+
+/* ---------------- 选词查词：ECDICT 离线词典（Issue #7） ---------------- */
+
+/**
+ * 词条查询：命中返回 { entry }；未收录 404；词典数据未准备 503。
+ * 错误对象携带 status 属性供界面区分提示。
+ */
+export async function fetchDictionaryLookup(word) {
+  const query = new URLSearchParams({ word });
+  return request(`/api/dictionary/lookup?${query.toString()}`);
+}
