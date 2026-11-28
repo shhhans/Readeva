@@ -62,6 +62,8 @@ const convertSeq = () =>
 const waitFor = (fn, timeout = 20000) =>
   expect.poll(fn, { timeout, intervals: [100, 200, 500] });
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 test('阅读位置更新：当前页立即解析，后续页优先排队，前置页降级', async ({ request }) => {
   await setup();
   const doc = await importFixtureA(request);
@@ -261,7 +263,7 @@ test('显式请求置顶不被随后的阅读位置重排降级（pinned）', as
   ]);
 });
 
-test('并发 2：两页同时转换（并行 in-flight），其余排队', async ({ request }) => {
+test('并发 2：两页同时转换（并行 in-flight），其余排队——同时验证开局双槽同步填充（无样本不 pacing）', async ({ request }) => {
   await setup({ mockOptions: { convertDelayMs: 250 }, env: { READEVA_PARSE_CONCURRENCY: '2' } });
   const doc = await importFixtureA(request);
 
@@ -326,25 +328,78 @@ test('并发上限钐制：非法值回落 1，更高配置生效', async ({ req
   expect(progress.pages.slice(0, 3).every((p) => p.status === 'running')).toBe(true);
 });
 
-test('扫全节流 READEVA_PARSE_SWEEP_DELAY_MS：背景派发间隔生效，显式请求不受限', async ({ request }) => {
-  // convertDelayMs 拉长转换窗口，确保轮询能观察到 p2 的 running 状态。
-  await setup({ mockOptions: { convertDelayMs: 300 }, env: { READEVA_PARSE_CONCURRENCY: '2', READEVA_PARSE_SWEEP_DELAY_MS: '400' } });
+test('扫全节流 READEVA_PARSE_SWEEP_DELAY_MS：固定间隔覆盖动态 pacing（开局填充后生效）', async ({ request }) => {
+  await setup({ env: { READEVA_PARSE_CONCURRENCY: '2', READEVA_PARSE_SWEEP_DELAY_MS: '400' } });
   const doc = await importFixtureA(request);
 
-  // 首个派发不受节流影响（立即开始）；第二个背景派发被节流，任务留在队首。
+  // 开局填充：新会话立即填满两槽（不做 pacing，覆盖固定间隔同样豁免）。
   let progress = (await (await putReadingPosition(request, doc.id, 1)).json()).progress;
   expect(progress.pages[0]).toMatchObject({ page: 1, status: 'running' });
-  expect(progress.pages[1]).toMatchObject({ page: 2, status: 'queued' });
-  expect(progress.running).toBe(1);
+  expect(progress.pages[1]).toMatchObject({ page: 2, status: 'running' });
 
-  // 显式请求不受节流限制：立即占用空闲槽。
+  // 开局填充之后，背景派发受固定 400ms 间隔约束：槽释放后下一页先排队等待。
+  await waitFor(async () => (await getProgress(request, doc.id)).succeeded).toBeGreaterThanOrEqual(2);
+  progress = await getProgress(request, doc.id);
+  expect(progress.running, '槽释放后未立即回填 → 固定节流生效').toBeLessThan(2);
+
+  // 节流等待期间，显式请求/置顶页不受限：立即占用空闲槽。
   const post = await request.post(`${service.base}/api/documents/${doc.id}/pages/7/parse`);
   expect(post.status()).toBe(202);
   progress = await getProgress(request, doc.id);
   expect(progress.pages.find((p) => p.page === 7).status).toBe('running');
 
-  // 节流计时器到点后，第 2 页恢复派发。
-  await waitFor(async () => (await getProgress(request, doc.id)).pages[1].status).toBe('running');
+  // 节流计时器到点后恢复派发，直至扫全。
+  await waitFor(async () => (await getProgress(request, doc.id)).running).toBeGreaterThan(0);
+  await waitFor(async () => (await getProgress(request, doc.id)).succeeded).toBe(8);
+  expect(mock.convertCalls()).toBe(8);
+});
+
+test('动态 pacing：背景派发间隔随最近转换耗时缩放（慢页大间隔、快页小间隔）', async ({ request }) => {
+  await setup({ mockOptions: { convertDelayMs: 700 }, env: { READEVA_PARSE_CONCURRENCY: '2' } });
+
+  // 生成两份不同的 8 页 PDF（内容不同 → 不同文档身份）。
+  const makePdf = async (size) => {
+    const pdf = await PDFDocument.create();
+    for (let i = 0; i < 8; i += 1) pdf.addPage(size);
+    return Buffer.from(await pdf.save());
+  };
+  const importDoc = async (bytes, name) => {
+    const res = await request.post(`${service.base}/api/documents/import`, {
+      headers: { 'content-type': 'application/pdf', 'x-filename': name },
+      data: bytes,
+    });
+    expect(res.status()).toBe(201);
+    return (await res.json()).document;
+  };
+
+  // ---- 慢相（~780ms/页）：开局双槽同步填充（无样本不 pacing）；
+  // 后续背景派发按慢页估计 pacing（间隔 ≈ 750×0.5 ≈ 375ms）。 ----
+  const docA = await importDoc(await makePdf([595, 842]), 'slow-book.pdf');
+  const markA = mock.requests.length;
+  let progress = (await (await putReadingPosition(request, docA.id, 1)).json()).progress;
+  expect(progress.pages[0].status).toBe('running');
+  expect(progress.pages[1].status).toBe('running');
+  await waitFor(async () => (await getProgress(request, docA.id)).succeeded).toBe(8);
+  const slowSubmits = mock.requests.slice(markA).filter((r) => r.kind === 'convert');
+  expect(slowSubmits).toHaveLength(8);
+  const slowGap = Date.parse(slowSubmits[3].at) - Date.parse(slowSubmits[2].at);
+
+  // ---- 快相（~85ms/页）：setConvertDelay 切换；新文档 = 新扫全会话 → 开局双槽
+  // 同步填充（免 pacing），估计滚动收敛后后续派发间隔随之缩小 ----
+  mock.setConvertDelay(30);
+  const docB = await importDoc(await makePdf([612, 792]), 'fast-book.pdf');
+  const markB = mock.requests.length;
+  progress = (await (await putReadingPosition(request, docB.id, 1)).json()).progress;
+  expect(progress.pages[0].status).toBe('running');
+  expect(progress.pages[1].status).toBe('running');
+  await waitFor(async () => (await getProgress(request, docB.id)).succeeded).toBe(8);
+  const fastSubmits = mock.requests.slice(markB).filter((r) => r.kind === 'convert');
+  expect(fastSubmits).toHaveLength(8);
+  const fastGap = Date.parse(fastSubmits[5].at) - Date.parse(fastSubmits[4].at);
+
+  expect(slowGap, `慢相 p3→p4 间隔 ${slowGap}ms 应 > 200（慢页估计 × 0.5）`).toBeGreaterThan(200);
+  expect(fastGap, `快相 p5→p6 间隔 ${fastGap}ms 应 < 150（快页估计收敛 × 0.5）`).toBeLessThan(150);
+  expect(slowGap).toBeGreaterThan(fastGap);
 });
 
 test('B1 规模回归：进度/重排接口走轻量状态索引，不逐轮全量读盘（210 页 × ~600KB 记录）', async ({ request }) => {

@@ -15,10 +15,11 @@ import { DoclingServiceError, extractPage } from './docling.js';
  * - 跳页只重排未开始任务：进行中的页不取消、不重复启动；
  * - 已完成页从队列摘除并复用结果；失败页标记失败、不回队、不阻塞队列；
  * - 队列按序补全其余未解析页（闲置补全）；失败页仅通过显式请求重试；
- * - 全局并发上限可配置（默认 2，与 docling_service 线程池对齐）；背景派发可节流。
+ * - 全局并发上限可配置（默认 2，与 docling_service 线程池对齐）；背景派发 pacing
+ *   动态自适应设备性能（最近 N 页转换耗时 × 系数，钐制上限），可用固定间隔覆盖。
  */
 export class ParseTaskManager {
-  constructor({ store, adapter, library, concurrency = 2, sweepDelayMs = 0 }) {
+  constructor({ store, adapter, library, concurrency = 2, sweepDelayMs = 0, sweepPacingFactor = 0.5 }) {
     this.store = store;
     this.adapter = adapter;
     this.library = library;
@@ -28,9 +29,23 @@ export class ParseTaskManager {
     this.concurrency =
       Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1;
     const sweep = Number(sweepDelayMs);
-    // 背景扫全派发节流（毫秒）：连续背景转换之间的最小启动间隔；显式请求/置顶页
-    // 不受限。0 = 不节流。用于并发 2 下缓解持续满核 CPU。
-    this.sweepDelayMs = Number.isFinite(sweep) && sweep > 0 ? Math.floor(sweep) : 0;
+    // 背景派发节流固定覆盖值：>0 时使用固定间隔；0/未设置 = 动态 pacing（默认）。
+    this.fixedSweepDelayMs = Number.isFinite(sweep) && sweep > 0 ? Math.floor(sweep) : 0;
+    const factor = Number(sweepPacingFactor);
+    // 动态 pacing 系数：背景派发间隔 = 最近转换耗时估计 × 系数。设备快→间隔小
+    // 吞吐高；设备慢→间隔大、留 CPU 给阅读交互。系数 >0.5 时并发 2 下会出现 CPU 空隙。
+    this.sweepPacingFactor = Number.isFinite(factor) && factor > 0 ? factor : 0.5;
+    // 背景派发间隔钐制上限（避免慢页估计把间隔拉到数秒以上）。
+    this.MAX_SWEEP_INTERVAL_MS = 5000;
+    // 最近转换耗时样本（派发→succeeded/failed，不含排队等待），滚动估计用。
+    this.conversionDurations = [];
+    this.CONVERSION_SAMPLE_COUNT = 3;
+    /** `${docId}:${page}` -> 派发时间戳，完成时计算耗时。 */
+    this.dispatchTimes = new Map();
+    /** 进行中的扫全会话（文档打开/首次上报开始，队列排空后结束）。 */
+    this.sweepSessions = new Set();
+    /** 开局填充额度：新会话授予 concurrency 个免 pacing 的背景派发。 */
+    this.openingBurst = new Map();
     this.lastSweepDispatchAt = 0;
     this.sweepTimer = null;
     /** docId -> Set<page>，内存中的进行中任务。 */
@@ -101,6 +116,13 @@ export class ParseTaskManager {
       if (this.store.getStatus(docId, p)) this.pinned.get(docId)?.delete(p);
     }
     this.queues.set(docId, queue);
+    // 扫全会话管理：文档首次上报（无进行中会话）授予开局填充额度——立即填满
+    // 所有并发槽，不做 pacing；pacing 只作用于后续背景派发。
+    if (!this.sweepSessions.has(docId)) {
+      this.openingBurst.set(docId, this.concurrency);
+    }
+    if (queue.length > 0 || this.running.has(docId)) this.sweepSessions.add(docId);
+    else this.sweepSessions.delete(docId);
     this.pump();
     return queue;
   }
@@ -143,20 +165,21 @@ export class ParseTaskManager {
     return total;
   }
 
-  /** 按并发上限派发队列任务；背景任务受扫全节流约束（置顶/显式页不受限）。 */
+  /** 按并发上限派发队列任务；开局填充与置顶/显式页免 pacing，其余背景任务受 pacing 约束。 */
   pump() {
     for (;;) {
       if (this.runningCount() >= this.concurrency) return;
       const next = this.takeNext();
       if (!next) return;
+      const burst = this.openingBurst.get(next.docId) ?? 0;
+      const interval = next.pinned || burst > 0 ? 0 : this.sweepIntervalMs();
       if (
-        !next.pinned &&
-        this.sweepDelayMs > 0 &&
-        Date.now() - this.lastSweepDispatchAt < this.sweepDelayMs
+        interval > 0 &&
+        Date.now() - this.lastSweepDispatchAt < interval
       ) {
-        // 未到节流间隔：任务留在队首（不占并发槽），挂定时器到点继续派发。
+        // 未到 pacing 间隔：任务留在队首（不占并发槽），挂定时器到点继续派发。
         if (!this.sweepTimer) {
-          const wait = this.sweepDelayMs - (Date.now() - this.lastSweepDispatchAt);
+          const wait = interval - (Date.now() - this.lastSweepDispatchAt);
           this.sweepTimer = setTimeout(() => {
             this.sweepTimer = null;
             this.pump();
@@ -165,8 +188,41 @@ export class ParseTaskManager {
         return;
       }
       this.claimNext(next.docId, next.page);
-      this.lastSweepDispatchAt = Date.now();
+      if (!next.pinned) {
+        this.lastSweepDispatchAt = Date.now();
+        if (burst > 0) this.openingBurst.set(next.docId, burst - 1);
+      }
       this.runInBackground(next.docId, next.page);
+    }
+  }
+
+  /** 最近 N 次转换耗时均值（毫秒）；无样本（开局）返回 null。 */
+  estimateConversionMs() {
+    if (this.conversionDurations.length === 0) return null;
+    const sum = this.conversionDurations.reduce((a, b) => a + b, 0);
+    return sum / this.conversionDurations.length;
+  }
+
+  /**
+   * 背景派发间隔：固定覆盖值（READEVA_PARSE_SWEEP_DELAY_MS > 0）优先；
+   * 否则动态 pacing = 最近转换耗时估计 × 系数，钐制 [0, MAX_SWEEP_INTERVAL_MS]。
+   * 无样本（开局首扫）返回 0：立即填满并发槽，不做 pacing。
+   */
+  sweepIntervalMs() {
+    if (this.fixedSweepDelayMs > 0) return this.fixedSweepDelayMs;
+    const estimate = this.estimateConversionMs();
+    if (estimate === null) return 0;
+    return Math.min(
+      Math.max(Math.round(estimate * this.sweepPacingFactor), 0),
+      this.MAX_SWEEP_INTERVAL_MS,
+    );
+  }
+
+  /** 记录一次转换耗时（滚动样本，供动态 pacing 估计）。 */
+  recordConversionDuration(ms) {
+    this.conversionDurations.push(ms);
+    if (this.conversionDurations.length > this.CONVERSION_SAMPLE_COUNT) {
+      this.conversionDurations.shift();
     }
   }
 
@@ -213,6 +269,9 @@ export class ParseTaskManager {
     set.add(page);
 
     const requestedAt = new Date().toISOString();
+    const dispatchedAt = Date.now();
+    const durationKey = `${docId}:${page}`;
+    this.dispatchTimes.set(durationKey, dispatchedAt);
     const task = this.run(docId, page, requestedAt)
       .catch((err) => {
         console.error(`parse failed (doc=${docId} page=${page}): ${err.message}`);
@@ -221,6 +280,17 @@ export class ParseTaskManager {
       .finally(() => {
         set.delete(page);
         if (set.size === 0) this.running.delete(docId);
+        // 转换耗时 = 派发 → succeeded/failed（不含排队等待），滚动样本供动态 pacing。
+        const started = this.dispatchTimes.get(durationKey);
+        if (started !== undefined) {
+          this.dispatchTimes.delete(durationKey);
+          this.recordConversionDuration(Date.now() - started);
+        }
+        // 扫全会话结束（队列空且无运行中任务）：下次上报重新授予开局填充。
+        if (!this.queues.get(docId)?.length && !this.running.has(docId)) {
+          this.sweepSessions.delete(docId);
+          this.openingBurst.delete(docId);
+        }
         // 任务结束（成功或失败）后继续派发队列下一页：失败不阻塞队列。
         this.pump();
       });

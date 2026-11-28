@@ -56,6 +56,7 @@ export function startMockDocling({
   let steps = null; // 行为脚本：逐次消耗；null = 始终成功
   let stepIndex = 0;
   let pageFailures = { ...failPages };
+  let pollDelay = convertDelayMs; // 运行时可变（setConvertDelay），供动态 pacing 测试
 
   const nextOutcome = () => {
     if (!steps) return { mode: 'success', document: null };
@@ -109,7 +110,7 @@ export function startMockDocling({
         return;
       }
       task.polls += 1;
-      if (convertDelayMs) await delay(convertDelayMs);
+      if (pollDelay) await delay(pollDelay);
       let status;
       if (task.polls <= pollsBeforeDone) {
         status = 'started';
@@ -182,6 +183,10 @@ export function startMockDocling({
         /** 运行时切换按页固定失败（null/{} = 清除）。优先于行为脚本。 */
         setFailPages(next) {
           pageFailures = { ...(next ?? {}) };
+        },
+        /** 运行时切换轮询延迟（模拟转换快/慢），供动态 pacing 测试。 */
+        setConvertDelay(next) {
+          pollDelay = Number(next) || 0;
         },
         convertCalls() {
           return requests.filter((r) => r.kind === 'convert').length;

@@ -45,12 +45,18 @@ const config = {
       process.env.READEVA_PARSE_CONCURRENCY ??
       2,
   ),
-  // 背景扫全派发节流（毫秒）：连续背景转换之间的最小启动间隔，缓解持续满核 CPU；
-  // 显式请求/置顶页不受限。默认 0 = 不节流（现行为）。
+  // 背景扫全派发节流固定覆盖（毫秒）：>0 时使用固定间隔；0/未设置 = 动态 pacing
+  // （间隔 = 最近转换耗时估计 × 系数）。
   parseSweepDelayMs: Number(
     parseArg(process.argv, '--parse-sweep-delay-ms') ??
       process.env.READEVA_PARSE_SWEEP_DELAY_MS ??
       0,
+  ),
+  // 动态 pacing 系数：间隔 = 估计转换耗时 × 系数（默认 0.5；>0.5 时并发 2 出现 CPU 空隙）。
+  parseSweepPacingFactor: Number(
+    parseArg(process.argv, '--parse-sweep-pacing-factor') ??
+      process.env.READEVA_PARSE_SWEEP_PACING_FACTOR ??
+      0.5,
   ),
 };
 
@@ -77,6 +83,7 @@ const parseTasks = doclingAdapter
       library,
       concurrency: config.parseConcurrency,
       sweepDelayMs: config.parseSweepDelayMs,
+      sweepPacingFactor: config.parseSweepPacingFactor,
     })
   : null;
 const app = express();
