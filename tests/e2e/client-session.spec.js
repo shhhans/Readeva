@@ -203,6 +203,21 @@ test('验收 4：重连取回已完成成果（不重新解析）并按当前阅
   expect(mock.convertCalls()).toBe(8);
 });
 
+test('默认宽限期 300000ms：不配置时 session 端点报告 5 分钟默认值（隐藏标签节流取舍）', async ({ request }) => {
+  await setup(); // 不设 READEVA_CLIENT_GRACE_MS
+  const doc = await importFixture(FIXTURE_A, 'sample-a.pdf', request);
+
+  await putReadingPosition(request, doc.id, 1);
+  const session = await getSession(request, doc.id);
+  expect(session.graceMs).toBe(300000);
+  expect(session.expired).toBe(false);
+  // 默认值远大于客户端心跳间隔（8s 慢刷新，隐藏标签节流后约 1 次/分钟）：
+  // 短暂无活动（含后台标签被节流的窗口）不会误判到期。
+  await delay(600);
+  const later = await getSession(request, doc.id);
+  expect(later.expired).toBe(false);
+});
+
 test('验收 5 配套：会话端点只读观察（不刷新 lastSeen）、宽限期可配置、未配置解析服务时降级', async ({ request }) => {
   await setup({ env: { READEVA_CLIENT_GRACE_MS: '1000' } });
   const doc = await importFixture(FIXTURE_A, 'sample-a.pdf', request);

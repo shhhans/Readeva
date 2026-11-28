@@ -16,7 +16,9 @@ import { DoclingServiceError, PageExtractor } from './docling.js';
  * - 已完成页从队列摘除并复用结果；失败页标记失败、不回队、不阻塞队列；
  * - 队列按序补全其余未解析页（闲置补全）；失败页仅通过显式请求重试；
  * - 全局并发上限可配置（默认 2，与 docling_service 线程池对齐）；背景派发 pacing
- *   动态自适应设备性能（最近 N 页转换耗时 × 系数，钳制上限），可用固定间隔覆盖。
+ *   动态自适应设备性能（最近 N 页转换耗时 × 系数，钳制上限），可用固定间隔覆盖；
+ *   系数 0 = 关闭 pacing（不节流）；**pacing 状态按文档分桶**（A 的间隔不挡 B）；
+ *   **当前页豁免 pacing**（用户当前页不被背景间隔拖住）。
  *
  * 客户端会话与宽限期（Issue #6）：
  * - 客户端任何文档活动（阅读位置上报/进度轮询/状态轮询/解析请求等）刷新 lastSeen；
@@ -42,12 +44,14 @@ export class ParseTaskManager {
     this.fixedSweepDelayMs = Number.isFinite(sweep) && sweep > 0 ? Math.floor(sweep) : 0;
     const factor = Number(sweepPacingFactor);
     // 动态 pacing 系数：背景派发间隔 = 最近转换耗时估计 × 系数。设备快→间隔小
-    // 吞吐高；设备慢→间隔大、留 CPU 给阅读交互。系数 >0.5 时并发 2 下会出现 CPU 空隙。
-    this.sweepPacingFactor = Number.isFinite(factor) && factor > 0 ? factor : 0.5;
+    // 吞吐高；设备慢→间隔大、留 CPU 给阅读交互。系数 >0.5 时并发 2 下会出现 CPU
+    // 空隙；**系数 0 = 关闭 pacing（不节流）**，非法值/负数回落默认 0.5。
+    this.sweepPacingFactor = Number.isFinite(factor) && factor >= 0 ? factor : 0.5;
     // 客户端会话宽限期（毫秒）：超过该时长无客户端活动即视为退出（Issue #6）。
-    // 默认 60s，必须大于客户端心跳间隔（阅读视图内整本进度慢刷新 8s）以避免误判。
+    // 默认 300000（5 分钟）：浏览器隐藏标签页节流页面内定时器（约 1 次/分钟），
+    // 默认值必须大于客户端心跳间隔（8s 慢刷新被节流稀释后仍留足余量）。
     const grace = Number(clientGraceMs);
-    this.clientGraceMs = Number.isFinite(grace) && grace > 0 ? Math.floor(grace) : 60000;
+    this.clientGraceMs = Number.isFinite(grace) && grace > 0 ? Math.floor(grace) : 300000;
     // 按页抽取器：整本 PDF 只解析一次并缓存（避免每页全量加载，执行路径归口）。
     this.extractor = new PageExtractor({ library });
     // 背景派发间隔钳制上限（避免慢页估计把间隔拉到数秒以上）。
@@ -61,8 +65,12 @@ export class ParseTaskManager {
     this.sweepSessions = new Set();
     /** 开局填充额度：新会话授予 concurrency 个免 pacing 的背景派发。 */
     this.openingBurst = new Map();
-    this.lastSweepDispatchAt = 0;
-    this.sweepTimer = null;
+    /** docId -> 该文档最近一次背景派发时间（pacing 按文档分桶，A 的间隔不挡 B）。 */
+    this.lastSweepDispatchAtMap = new Map();
+    /** docId -> 该文档的 pacing 等待定时器（到点重新 pump）。 */
+    this.sweepTimers = new Map();
+    /** docId -> 当前阅读页（Issue #6 ④：当前页豁免 pacing，不被背景间隔拖住）。 */
+    this.currentPage = new Map();
     /** docId -> Set<page>，内存中的进行中任务。 */
     this.running = new Map();
     /** docId -> number[]，未开始任务的优先队列（队首最先解析）。 */
@@ -140,14 +148,17 @@ export class ParseTaskManager {
 
   /**
    * 宽限期到期处置（幂等，重连/多次到期不误伤）：完成已开始页（running 不取消、
-   * 继续跑完并落盘），清除尚未开始的任务（队列/置顶标记），结束扫全会话；
-   * 无运行中任务时释放整本 PDF 缓存。
+   * 继续跑完并落盘），清除尚未开始的任务（队列/置顶标记），结束扫全会话，
+   * 释放该文档的 pacing 状态与整本 PDF 缓存。
    */
   expireDoc(docId) {
     this.queues.delete(docId);
     this.pinned.delete(docId);
     this.sweepSessions.delete(docId);
     this.openingBurst.delete(docId);
+    this.clearDocTimer(docId);
+    this.lastSweepDispatchAtMap.delete(docId);
+    this.currentPage.delete(docId);
     if (!this.running.has(docId)) this.extractor.release(docId);
   }
 
@@ -157,12 +168,19 @@ export class ParseTaskManager {
     for (const docId of [...this.lastSeen.keys()]) {
       if (now - this.lastSeen.get(docId) > this.clientGraceMs) this.expireDoc(docId);
     }
-    // statusCache / indexCache / lastSeen 随文档清理（与删除能力联动；删除未实现时
-    // 保证缓存不无界增长）。书库清单取自内存态 documents（不逐轮读盘）。
+    // statusCache / indexCache / lastSeen / pacing 状态随文档清理（与删除能力联动；
+    // 删除未实现时保证缓存不无界增长）。书库清单取自内存态 documents（不逐轮读盘）。
     const valid = new Set(Object.keys(this.library.documents));
     this.store.pruneStatusCache(valid);
     for (const docId of [...this.lastSeen.keys()]) {
       if (!valid.has(docId)) this.lastSeen.delete(docId);
+    }
+    for (const docId of [...this.lastSweepDispatchAtMap.keys()]) {
+      if (!valid.has(docId)) {
+        this.lastSweepDispatchAtMap.delete(docId);
+        this.currentPage.delete(docId);
+        this.clearDocTimer(docId);
+      }
     }
   }
 
@@ -178,8 +196,9 @@ export class ParseTaskManager {
   updateReadingPosition(docId, page) {
     const doc = this.library.getDocument(docId);
     if (!doc) throw new DoclingServiceError('document not found');
-    // 阅读位置上报 = 客户端活动（会话存续，Issue #6）。
+    // 阅读位置上报 = 客户端活动（会话存续，Issue #6）；当前页记录用于 pacing 豁免。
     this.touch(docId);
+    this.currentPage.set(docId, page);
     const order = [];
     for (let p = page; p <= doc.pageCount; p += 1) order.push(p);
     for (let p = 1; p < page; p += 1) order.push(p);
@@ -247,35 +266,68 @@ export class ParseTaskManager {
     return total;
   }
 
-  /** 按并发上限派发队列任务；开局填充与置顶/显式页免 pacing，其余背景任务受 pacing 约束。 */
+  /**
+   * 按并发上限派发队列任务。开局填充、置顶/显式页与**当前页**免 pacing，
+   * 其余背景任务受 pacing 约束；**pacing 状态按文档分桶**（每文档独立
+   * lastSweepDispatchAt 与等待定时器）——文档 A 的间隔不挡文档 B 的派发。
+   */
   pump() {
     for (;;) {
       if (this.runningCount() >= this.concurrency) return;
+      // 扫描一轮各文档队列：跳过 pacing 未到的文档（挂各自定时器），
+      // 派发首个可派发的文档；全部在等自己的间隔则返回等待定时器。
+      if (!this.scanForDispatch()) return;
+    }
+  }
+
+  /**
+   * 扫描一轮队列（跨文档轮转）：对每个文档取队首，pacing 未到则留队首并挂
+   * 该文档自己的定时器；派发一个可派发任务返回 true，无可派发返回 false。
+   */
+  scanForDispatch() {
+    const docCount = this.queues.size;
+    for (let i = 0; i < docCount; i += 1) {
       const next = this.takeNext();
-      if (!next) return;
+      if (!next) return null;
       const burst = this.openingBurst.get(next.docId) ?? 0;
-      const interval = next.pinned || burst > 0 ? 0 : this.sweepIntervalMs();
-      if (
-        interval > 0 &&
-        Date.now() - this.lastSweepDispatchAt < interval
-      ) {
-        // 未到 pacing 间隔：任务留在队首（不占并发槽），挂定时器到点继续派发。
-        if (!this.sweepTimer) {
-          const wait = interval - (Date.now() - this.lastSweepDispatchAt);
-          this.sweepTimer = setTimeout(() => {
-            this.sweepTimer = null;
-            this.pump();
-          }, wait);
+      const isCurrent = this.currentPage.get(next.docId) === next.page;
+      const interval = next.pinned || isCurrent || burst > 0 ? 0 : this.sweepIntervalMs();
+      const last = this.lastSweepDispatchAtMap.get(next.docId) ?? 0;
+      if (interval > 0 && Date.now() - last < interval) {
+        // 该文档未到自己的 pacing 间隔：任务留在队首（不占并发槽），
+        // 挂该文档定时器（已挂过则跳过，其余文档同样在等自己的间隔）。
+        if (!this.sweepTimers.has(next.docId)) {
+          this.armDocTimer(next.docId, interval - (Date.now() - last));
         }
-        return;
+        continue;
       }
       this.claimNext(next.docId, next.page);
-      if (!next.pinned) {
-        this.lastSweepDispatchAt = Date.now();
-        if (burst > 0) this.openingBurst.set(next.docId, burst - 1);
+      // 开局填充额度照常消费（当前页豁免 pacing 不豁免额度）；
+      // 置顶/当前页派发不计入本文档的 pacing 基线（不拖住后续背景派发）。
+      if (burst > 0) this.openingBurst.set(next.docId, burst - 1);
+      if (!next.pinned && !isCurrent) {
+        this.lastSweepDispatchAtMap.set(next.docId, Date.now());
       }
       this.runInBackground(next.docId, next.page);
+      return true;
     }
+    return false;
+  }
+
+  /** 挂文档级 pacing 定时器：到点重新 pump（该文档间隔已过即可派发）。 */
+  armDocTimer(docId, wait) {
+    const timer = setTimeout(() => {
+      this.sweepTimers.delete(docId);
+      this.pump();
+    }, wait);
+    this.sweepTimers.set(docId, timer);
+  }
+
+  /** 清理文档的 pacing 定时器（会话到期/队列排空时）。 */
+  clearDocTimer(docId) {
+    const timer = this.sweepTimers.get(docId);
+    if (timer) clearTimeout(timer);
+    this.sweepTimers.delete(docId);
   }
 
   /** 最近 N 次转换耗时均值（毫秒）；无样本（开局）返回 null。 */
@@ -288,7 +340,7 @@ export class ParseTaskManager {
   /**
    * 背景派发间隔：固定覆盖值（READEVA_PARSE_SWEEP_DELAY_MS > 0）优先；
    * 否则动态 pacing = 最近转换耗时估计 × 系数，钳制 [0, MAX_SWEEP_INTERVAL_MS]。
-   * 无样本（开局首扫）返回 0：立即填满并发槽，不做 pacing。
+   * 无样本（开局首扫）或系数 0（不节流档）返回 0：立即派发，不做 pacing。
    */
   sweepIntervalMs() {
     if (this.fixedSweepDelayMs > 0) return this.fixedSweepDelayMs;
@@ -399,11 +451,14 @@ export class ParseTaskManager {
           this.recordConversionDuration(Date.now() - started);
         }
         // 扫全会话结束（队列空且无运行中任务）：下次上报重新授予开局填充；
-        // 同时释放整本 PDF 缓存（执行路径归口：避免文档长时间驻留内存）。
+        // 同时释放整本 PDF 缓存与文档级 pacing 状态（执行路径归口）。
         if (!this.queues.get(docId)?.length && !this.running.has(docId)) {
           this.sweepSessions.delete(docId);
           this.openingBurst.delete(docId);
           this.extractor.release(docId);
+          this.clearDocTimer(docId);
+          this.lastSweepDispatchAtMap.delete(docId);
+          this.currentPage.delete(docId);
         }
         // 任务结束（成功或失败）后继续派发队列下一页：失败不阻塞队列。
         this.pump();
