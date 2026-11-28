@@ -13,6 +13,7 @@ import { PdfViewer } from './pdf-viewer.js';
 import { ParsePanel } from './parse-panel.js';
 import { PageLinkage } from './page-linkage.js';
 import { WordLookup } from './dictionary.js';
+import { Translator } from './translator.js';
 
 const state = {
   view: 'library',
@@ -181,6 +182,7 @@ function teardownReader() {
   }
   if (state.parsePanel) state.parsePanel.reset();
   if (state.wordLookup) state.wordLookup.reset();
+  if (state.translator) state.translator.reset();
   // 清除渲染完成标记，避免残留值干扰下次打开时的就绪判定。
   delete $('#viewer').dataset.page;
   delete $('#viewer').dataset.zoom;
@@ -337,6 +339,17 @@ state.wordLookup = new WordLookup({
   },
 });
 state.wordLookup.attach();
+
+// 选文与内容块翻译（Issue #8）：右侧主动翻译，译文显示在对应内容旁；
+// 复用已保存译文，请求中/失败状态可见。
+state.translator = new Translator({
+  panel: $('#parse-panel'),
+  content: $('#parse-content'),
+  blocks: $('#parse-blocks'),
+  toolbar: $('#selection-toolbar'),
+  translateButton: $('#translate-selection-button'),
+});
+state.translator.attach();
 
 // 原页与内容块双向联动（Issue #4）：覆盖层、双向高亮与主动定位。
 const linkage = new PageLinkage({

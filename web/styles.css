@@ -355,6 +355,7 @@ tbody tr:last-child td { border-bottom: none; }
 .parse-block {
   margin: 0 0 14px;
   border-radius: 6px;
+  position: relative; /* 内容块翻译按钮定位（Issue #8） */
 }
 
 /* 双向联动高亮：悬浮与选中（不改布局，避免内容跳动）。 */
@@ -438,6 +439,112 @@ dialog {
 dialog::backdrop { background: rgba(20, 24, 40, 0.35); }
 
 dialog h2 { font-size: 16px; margin: 0 0 14px; }
+
+/* ---------------- 选文与内容块翻译：MiniMax（Issue #8） ---------------- */
+
+/* 内容块右上角的翻译入口：常显但低调，悬浮块时提亮。 */
+.block-translate-button {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  opacity: 0.35;
+  transition: opacity 0.12s ease;
+}
+
+.parse-block:hover .block-translate-button,
+.block-translate-button:hover,
+.block-translate-button:focus-visible {
+  opacity: 1;
+}
+
+/* 译文：显示在对应内容块旁（紧跟来源块/包含选文的块，找不到时列表末尾）。 */
+.block-translation {
+  margin: -8px 0 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: #fafbff;
+}
+
+.block-translation.is-error {
+  border-left-color: #c23934;
+}
+
+.block-translation.is-loading .translation-header {
+  color: var(--muted);
+}
+
+.translation-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.translation-label {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.translation-source-tag,
+.translation-target {
+  white-space: nowrap;
+}
+
+.translation-reused {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: #3038a8;
+  white-space: nowrap;
+}
+
+.translation-engine { white-space: nowrap; }
+
+.translation-toggle {
+  padding: 1px 8px;
+  font-size: 12px;
+  border: none;
+  background: none;
+  color: var(--muted);
+}
+
+.translation-toggle:hover { color: var(--accent); }
+
+.block-translation.is-collapsed .translation-body { display: none; }
+
+.translation-body { margin: 6px 0 0; }
+
+.translation-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.translation-loading,
+.translation-error {
+  margin: 0;
+  font-size: 13px;
+}
+
+.translation-loading {
+  color: var(--muted);
+}
+
+.translation-error {
+  color: #c23934;
+}
 
 /* ---------------- 选词查词（Issue #7） ---------------- */
 

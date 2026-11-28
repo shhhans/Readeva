@@ -6,6 +6,22 @@ import { DoclingAdapter } from './docling.js';
 import { ParseStore } from './parse-store.js';
 import { ParseTaskManager, buildParseProgress } from './page-tasks.js';
 import { DictionaryStore, DictionaryNotPreparedError, normalizeLookupKey, MAX_LOOKUP_LENGTH } from './dictionary.js';
+import {
+  MiniMaxTranslator,
+  MinimaxServiceError,
+  MINIMAX_MODEL,
+  DEFAULT_MINIMAX_BASE_URL,
+  MINIMAX_API_KEY_ENV,
+} from './minimax.js';
+import {
+  TranslationStore,
+  DEFAULT_TARGET_LANGUAGE,
+  MAX_TRANSLATION_SOURCE_LENGTH,
+  normalizeSelectionText,
+  selectionSourceKey,
+  blockSourceKey,
+  translationId,
+} from './translations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -74,6 +90,22 @@ const config = {
     parseArg(process.argv, '--ecdict-dir') ??
     process.env.READEVA_ECDICT_DIR ??
     path.join(dataDirOption, 'dict', 'ecdict'),
+  // MiniMax 翻译（Issue #8）：中国站（国内站）OpenAI 兼容接口，模型固定
+  // MiniMax-M3.1-Flash；默认地址取国内站官方文档（https://api.minimax.cn/v1）。
+  // 国际站（api.minimax.io）不使用——密钥与模型订阅按站区分；测试可用该变量指向 mock。
+  minimaxBaseUrl:
+    parseArg(process.argv, '--minimax-url') ??
+    process.env.READEVA_MINIMAX_BASE_URL ??
+    DEFAULT_MINIMAX_BASE_URL,
+  // 指定密钥环境变量（Hans 确认本机已设置）：仅服务端读取，客户端不接触，
+  // 接口响应不含密钥字段；未设置时翻译接口返回 503 与明确提示。
+  minimaxApiKey: process.env[MINIMAX_API_KEY_ENV] ?? '',
+  // 单次翻译超时（毫秒）：MiniMax-M3.1-Flash 为思考型模型，留足长译文余量。
+  minimaxTimeoutMs: Number(
+    parseArg(process.argv, '--minimax-timeout-ms') ??
+      process.env.READEVA_MINIMAX_TIMEOUT_MS ??
+      120_000,
+  ),
 };
 
 if (!Number.isFinite(config.port) || config.port < 0 || config.port > 65535) {
@@ -103,6 +135,13 @@ const parseTasks = doclingAdapter
       clientGraceMs: config.clientGraceMs,
     })
   : null;
+// MiniMax 翻译适配层（Issue #8）：密钥仅服务端持有；未配置时接口给出明确提示。
+const minimaxTranslator = new MiniMaxTranslator({
+  apiKey: config.minimaxApiKey,
+  baseUrl: config.minimaxBaseUrl,
+  timeoutMs: config.minimaxTimeoutMs,
+});
+const translationStore = new TranslationStore(config.dataDir);
 const app = express();
 app.disable('x-powered-by');
 
@@ -398,6 +437,208 @@ app.get('/api/dictionary/lookup', async (req, res, next) => {
   }
 });
 
+/* ---------------- 选文与内容块翻译：MiniMax（Issue #8） ---------------- */
+
+/**
+ * 从页解析记录中提取内容块的待翻译源文本（服务端自行提取，客户端只传块 id，
+ * 保证译文与解析内容一致）。图片等无文本块返回 null（不支持翻译）。
+ */
+function extractBlockSourceText(block) {
+  switch (block?.kind) {
+    case 'heading':
+    case 'paragraph':
+      return typeof block.text === 'string' ? block.text : '';
+    case 'list':
+      return (Array.isArray(block.items) ? block.items : []).join('\n');
+    case 'table': {
+      const rows = Array.isArray(block.rows) ? block.rows : [];
+      return rows.map((row) => (Array.isArray(row) ? row.join('\t') : '')).join('\n');
+    }
+    default:
+      return null;
+  }
+}
+
+/** 同一译文（同文档+解析+来源+语言）的在途请求去重：双击/重复点击只翻译一次。 */
+const translationInFlight = new Map();
+
+function translateOnce(key, params) {
+  const existing = translationInFlight.get(key);
+  if (existing) return existing;
+  const wrapped = minimaxTranslator.translate(params).finally(() => {
+    if (translationInFlight.get(key) === wrapped) translationInFlight.delete(key);
+  });
+  translationInFlight.set(key, wrapped);
+  return wrapped;
+}
+
+// 翻译服务可用性（不含地址/密钥，供客户端提示「翻译服务未配置」）。
+app.get('/api/translate/service', (req, res) => {
+  res.json({
+    configured: minimaxTranslator.configured,
+    model: MINIMAX_MODEL,
+    defaultTargetLanguage: DEFAULT_TARGET_LANGUAGE,
+  });
+});
+
+// 翻译请求（选文或内容块 → 译文）：
+// - 200 { reused: true }  已有对应译文直接复用（不调用翻译服务、不重复落盘）；
+// - 201 { reused: false } 新翻译完成并自动保存（事务式：成功才写入）；
+// - 409 parseId 与当前页解析不一致（含解析替换期间返回的旧请求——不写入新解析）；
+// - 400 非法参数（缺 parseId/来源、选文超长、块不存在或无文本）；
+// - 404 未知文档；503 翻译服务未配置；502 翻译失败（失败不写入任何译文）。
+app.post('/api/documents/:id/pages/:page/translations', async (req, res, next) => {
+  try {
+    const doc = library.getDocument(req.params.id);
+    if (!doc) return res.status(404).json({ error: 'document not found' });
+    const page = resolvePageParam(req, res);
+    if (page === null) return;
+    // 翻译请求 = 客户端活动（会话存续，Issue #6）。
+    parseTasks?.touch(doc.id);
+
+    const body = req.body ?? {};
+    const parseId = typeof body.parseId === 'string' ? body.parseId.trim() : '';
+    if (!parseId) return res.status(400).json({ error: 'parseId is required' });
+    const targetLanguage =
+      typeof body.targetLanguage === 'string' && body.targetLanguage.trim()
+        ? body.targetLanguage.trim().slice(0, 32)
+        : DEFAULT_TARGET_LANGUAGE;
+    if (!/^[A-Za-z0-9_-]+$/.test(targetLanguage)) {
+      return res.status(400).json({ error: 'targetLanguage must be a language code' });
+    }
+
+    const source = body.source ?? {};
+    let sourceKind;
+    let blockId = null;
+    let sourceText = null;
+    let sourceKey;
+    if (source.kind === 'block') {
+      sourceKind = 'block';
+      blockId = typeof source.blockId === 'string' ? source.blockId.trim() : '';
+      if (!/^[\w.-]{1,64}$/.test(blockId)) {
+        return res.status(400).json({ error: 'source.blockId is required' });
+      }
+      sourceKey = blockSourceKey(blockId);
+    } else if (source.kind === 'selection') {
+      sourceKind = 'selection';
+      const normalized = normalizeSelectionText(source.text);
+      if (!normalized) {
+        return res.status(400).json({ error: 'source.text is required' });
+      }
+      if (normalized.length > MAX_TRANSLATION_SOURCE_LENGTH) {
+        return res
+          .status(400)
+          .json({ error: `source.text exceeds ${MAX_TRANSLATION_SOURCE_LENGTH} characters` });
+      }
+      sourceKey = selectionSourceKey(normalized);
+      sourceText = normalized;
+    } else {
+      return res.status(400).json({ error: 'source.kind must be "block" or "selection"' });
+    }
+
+    // 译文与页解析身份绑定：请求必须针对当前页解析（旧解析的译文请求直接拒绝）。
+    const current = parseStore.getRecord(doc.id, page);
+    if (!current || current.status !== 'succeeded') {
+      return res
+        .status(409)
+        .json({ error: 'page parse is not available', parseId: current?.parseId ?? null });
+    }
+    if (current.parseId !== parseId) {
+      return res
+        .status(409)
+        .json({ error: 'page parse has been replaced', parseId: current.parseId });
+    }
+
+    // 内容块来源：块必须存在于当前解析结果且携带可翻译文本。
+    if (sourceKind === 'block') {
+      const block = (current.blocks ?? []).find((b) => b?.id === blockId);
+      if (!block) {
+        return res.status(400).json({ error: 'block not found in page parse result' });
+      }
+      const text = extractBlockSourceText(block);
+      if (text === null || !text.trim()) {
+        return res.status(400).json({ error: 'block has no translatable text' });
+      }
+      sourceText = text;
+    }
+
+    // 已有对应译文直接复用：不重复翻译。
+    const existing = translationStore.find(doc.id, parseId, sourceKey, targetLanguage);
+    if (existing) {
+      return res.status(200).json({ reused: true, translation: existing });
+    }
+
+    if (!minimaxTranslator.configured) {
+      return res.status(503).json({ error: 'translation service not configured' });
+    }
+
+    // 事务式：翻译成功才写入；失败不落任何记录。
+    let translated;
+    try {
+      const dedupKey = `${doc.id}|${parseId}|${sourceKey}|${targetLanguage}`;
+      translated = await translateOnce(dedupKey, {
+        text: sourceText,
+        targetLanguage,
+      });
+    } catch (err) {
+      if (!(err instanceof MinimaxServiceError)) throw err;
+      return res.status(502).json({ error: `translation failed: ${err.message}` });
+    }
+
+    // 防污染：解析替换期间返回的旧翻译响应不得写入新解析——落盘前再次校验
+    // parseId 仍与当前页解析一致（不一致一律丢弃，不产生任何写入）。
+    const latest = parseStore.getRecord(doc.id, page);
+    if (!latest || latest.status !== 'succeeded' || latest.parseId !== parseId) {
+      return res
+        .status(409)
+        .json({ error: 'page parse replaced during translation', parseId: latest?.parseId ?? null });
+    }
+
+    const now = new Date().toISOString();
+    const entry = {
+      id: translationId(sourceKey, targetLanguage),
+      documentId: doc.id,
+      parseId,
+      page,
+      sourceKind,
+      blockId,
+      sourceKey,
+      // 块译文不重复存块文本（解析记录本身就是源）；选文存归一化源文本供展示与复用。
+      sourceText: sourceKind === 'selection' ? sourceText : null,
+      targetLanguage,
+      text: translated.text,
+      model: translated.model,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await translationStore.save(doc.id, parseId, entry);
+    res.status(201).json({ reused: false, translation: entry });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 取回当前页解析绑定的全部译文（客户端重开/重连恢复与复用的数据源）：
+// 译文按 parseId 读取——页解析被替换后旧译文不再出现（只返回当前解析的译文）。
+app.get('/api/documents/:id/pages/:page/translations', (req, res) => {
+  const doc = library.getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'document not found' });
+  const page = resolvePageParam(req, res);
+  if (page === null) return;
+  // 取回译文 = 客户端活动（会话存续，Issue #6）。
+  parseTasks?.touch(doc.id);
+  const current = parseStore.getRecord(doc.id, page);
+  // 未解析/解析失败/解析进行中：没有可绑定的解析身份，无译文。
+  if (!current || current.status !== 'succeeded') {
+    return res.json({ page, parseId: null, translations: [] });
+  }
+  res.json({
+    page,
+    parseId: current.parseId,
+    translations: translationStore.list(doc.id, current.parseId),
+  });
+});
+
 app.use('/api', (req, res) => {
   res.status(404).json({ error: 'not found' });
 });
@@ -424,6 +665,9 @@ const server = app.listen(config.port, config.host, () => {
     `Readeva docling service: ${doclingAdapter ? config.doclingUrl : 'not configured'}`,
   );
   console.log(`Readeva dictionary dir: ${config.ecdictDir}`);
+  console.log(
+    `Readeva translation service: ${minimaxTranslator.configured ? MINIMAX_MODEL : 'not configured (set MINIMAX_API_KEY)'}`,
+  );
 });
 
 server.on('error', (err) => {

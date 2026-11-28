@@ -52,6 +52,7 @@ export class ParsePanel {
     this.serviceConfigured = null; // null = 尚未探测
     this.docId = null;
     this.page = null;
+    this.parseId = null; // 当前页解析身份（译文绑定/取回用，Issue #8）
     this.generation = 0;
     this.pollTimer = 0;
     this.pollDeadline = 0;
@@ -123,11 +124,22 @@ export class ParsePanel {
 
   clearContent() {
     this.blocksEl.replaceChildren();
+    // 注意：不清 this.parseId——renderBlocks 内部会先调用本方法清空 DOM，
+    // 随后以当前解析身份发事件；解析身份的生命周期由 showPage/reset/loadResult 管理。
     this.notifyBlocksChanged();
   }
 
+  /**
+   * 内容列表变化事件：联动层据此重建原页覆盖框（Issue #4）；翻译层据此取回
+   * 当前页解析绑定的译文（Issue #8）。detail 携带 docId/page/parseId。
+   */
   notifyBlocksChanged() {
-    this.root.dispatchEvent(new CustomEvent(BLOCKS_CHANGED_EVENT, { bubbles: true }));
+    this.root.dispatchEvent(
+      new CustomEvent(BLOCKS_CHANGED_EVENT, {
+        bubbles: true,
+        detail: { docId: this.docId, page: this.page, parseId: this.parseId ?? null },
+      }),
+    );
   }
 
   /* ---------------- 生命周期 ---------------- */
@@ -144,6 +156,7 @@ export class ParsePanel {
     this.lastSelfHealAt = 0;
     this.docId = null;
     this.page = null;
+    this.parseId = null;
     this.pollDeadline = 0;
     this.stateKey = '';
     this.stateEl.replaceChildren();
@@ -161,6 +174,7 @@ export class ParsePanel {
     this.summaryTimer = 0;
     this.docId = docId;
     this.page = page;
+    this.parseId = null;
     this.stateKey = '';
     this.stateEl.replaceChildren();
     this.clearContent();
@@ -413,6 +427,7 @@ export class ParsePanel {
     }
     if (generation !== this.generation) return;
     this.setState('succeeded');
+    this.parseId = result.parseId ?? null;
     this.renderBlocks(result.blocks);
     // 完成事件：刷新一次整体进度。
     this.refreshSummary();
@@ -480,6 +495,16 @@ export class ParsePanel {
         return null;
     }
     wrapper.append(inner);
+    // 内容块翻译入口（Issue #8）：标题/段落/列表/表格可整块翻译；图片无文本不提供。
+    if (block.kind === 'heading' || block.kind === 'paragraph' || block.kind === 'list' || block.kind === 'table') {
+      const translate = document.createElement('button');
+      translate.type = 'button';
+      translate.className = 'block-translate-button';
+      translate.textContent = '翻译';
+      translate.title = '翻译此内容块（MiniMax-M3.1-Flash → 中文）';
+      translate.dataset.translateBlockButton = 'true';
+      wrapper.append(translate);
+    }
     return wrapper;
   }
 
