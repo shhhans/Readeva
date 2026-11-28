@@ -439,6 +439,119 @@ dialog::backdrop { background: rgba(20, 24, 40, 0.35); }
 
 dialog h2 { font-size: 16px; margin: 0 0 14px; }
 
+/* ---------------- 选词查词（Issue #7） ---------------- */
+
+/* 选词工具条：选中文本后浮现在选区上方（fixed 定位，不遮盖面板内容）。 */
+#selection-toolbar {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(15, 20, 40, 0.18);
+}
+
+#selection-toolbar[hidden] { display: none; }
+
+#dict-lookup-button {
+  padding: 4px 14px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 词典卡片：停靠在面板底部（不随内容列表滚动），结果与反馈都在这里。 */
+#dict-card {
+  flex: none;
+  max-height: 46%;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+  background: #fafbfe;
+  padding: 10px 16px 8px;
+}
+
+#dict-card[hidden] { display: none; }
+
+.dict-card-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.dict-card-header button {
+  padding: 0 6px;
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.dict-word { font-size: 16px; font-weight: 600; word-break: break-word; }
+
+.dict-phonetic { color: var(--muted); }
+
+.dict-body { margin-top: 6px; }
+
+.dict-status {
+  margin: 6px 0 0;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.dict-section { margin: 8px 0 0; }
+
+.dict-label {
+  display: inline-block;
+  vertical-align: top;
+  margin-right: 10px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  background: var(--accent-weak);
+  color: #3038a8;
+  font-size: 12px;
+}
+
+.dict-text {
+  display: inline;
+  margin: 0;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.dict-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dict-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+
+.dict-tag {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #eef0f5;
+  color: #4a5163;
+}
+
+.dict-facts, .dict-exchange { word-break: break-word; }
+
+.dict-card-footer {
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+dialog h2 { font-size: 16px; margin: 0 0 14px; }
+
 dialog label { display: block; margin-bottom: 10px; }
 
 dialog input {

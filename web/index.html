@@ -96,10 +96,36 @@
             <div id="parse-state" class="parse-state"></div>
             <div id="parse-blocks" class="parse-blocks"></div>
           </div>
+          <!-- 词典卡片（Issue #7）：选词查询 ECDICT 离线词典的结果区，停靠在面板底部。 -->
+          <div id="dict-card" hidden>
+            <header class="dict-card-header">
+              <span id="dict-word" class="dict-word"></span>
+              <span id="dict-phonetic" class="dict-phonetic mono" hidden></span>
+              <span class="spacer"></span>
+              <button id="dict-close" type="button" title="关闭词典结果" aria-label="关闭词典结果">×</button>
+            </header>
+            <div class="dict-body">
+              <p id="dict-status" class="dict-status" hidden></p>
+              <div id="dict-translation" class="dict-section" hidden>
+                <span class="dict-label">释义</span>
+                <p id="dict-translation-text" class="dict-text"></p>
+              </div>
+              <div id="dict-definition" class="dict-section" hidden>
+                <span class="dict-label">英释</span>
+                <p id="dict-definition-text" class="dict-text"></p>
+              </div>
+              <div id="dict-meta" class="dict-meta" hidden></div>
+            </div>
+            <footer class="dict-card-footer">释义来自本地 ECDICT 词典（MIT License）· 离线查询</footer>
+          </div>
         </aside>
       </div>
       <!-- 主动定位失败提示（悬浮失败静默不打断阅读，主动定位失败可提示）。 -->
       <div id="locate-toast" role="status" hidden></div>
+      <!-- 选词工具条（Issue #7）：在右侧内容选中文本后浮现，点「查词」发起 ECDICT 离线查询。 -->
+      <div id="selection-toolbar" hidden>
+        <button id="dict-lookup-button" type="button">查词</button>
+      </div>
     </section>
   </div>
   <script type="module" src="/app.js"></script>

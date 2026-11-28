@@ -12,6 +12,7 @@ import {
 import { PdfViewer } from './pdf-viewer.js';
 import { ParsePanel } from './parse-panel.js';
 import { PageLinkage } from './page-linkage.js';
+import { WordLookup } from './dictionary.js';
 
 const state = {
   view: 'library',
@@ -179,6 +180,7 @@ function teardownReader() {
     state.viewer = null;
   }
   if (state.parsePanel) state.parsePanel.reset();
+  if (state.wordLookup) state.wordLookup.reset();
   // 清除渲染完成标记，避免残留值干扰下次打开时的就绪判定。
   delete $('#viewer').dataset.page;
   delete $('#viewer').dataset.zoom;
@@ -313,6 +315,27 @@ document.addEventListener('keydown', (event) => {
 
 // 右侧解析面板：展示当前页解析状态与结构化内容。
 state.parsePanel = new ParsePanel({ root: $('#parse-panel') });
+
+// 选词查词（Issue #7）：右侧选词 → ECDICT 离线查询，结果停靠在面板底部。
+state.wordLookup = new WordLookup({
+  panel: $('#parse-panel'),
+  content: $('#parse-content'),
+  toolbar: $('#selection-toolbar'),
+  lookupButton: $('#dict-lookup-button'),
+  card: $('#dict-card'),
+  elements: {
+    word: $('#dict-word'),
+    phonetic: $('#dict-phonetic'),
+    close: $('#dict-close'),
+    status: $('#dict-status'),
+    translation: $('#dict-translation'),
+    translationText: $('#dict-translation-text'),
+    definition: $('#dict-definition'),
+    definitionText: $('#dict-definition-text'),
+    meta: $('#dict-meta'),
+  },
+});
+state.wordLookup.attach();
 
 // 原页与内容块双向联动（Issue #4）：覆盖层、双向高亮与主动定位。
 const linkage = new PageLinkage({

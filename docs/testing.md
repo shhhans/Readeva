@@ -79,6 +79,20 @@ B1 规模回归：「B1 规模回归：进度/重排接口走轻量状态索引�
 - **跨文档取任务轮转**：「round-robin 并发 1」两文档（8 页 + 4 页）严格交替派发（`A1,B1,A2,B2,…,B4,A5…A8`，按单页字节 sha256 映射断言）；「round-robin 并发 2」A 未排空前 B 已开始（`B1` 先于 `A8`），12 页各一次转换。
 - **状态索引**：解析落盘写 `index.json`（条目含页文件 mtime/size 快照，与页记录一致）；重启后冷启动经索引取状态（进度/parseId 与重启前一致，结果接口完整）；**失效回退**：外部删除页记录 → 状态回到未开始（索引不覆盖文件存在性）；外部替换页记录 → 状态反映新内容（索引防过期）。
 
+### 选词查词与 ECDICT 离线词典（Issue #7）
+
+文件：`tests/e2e/dictionary.spec.js`（串行；按父规格使用**固定 ECDICT 结果**：构建脚本从小型固定 CSV `tests/fixtures/dict/ecdict-fixture.csv` 生成临时词典目录，服务以 `READEVA_ECDICT_DIR` 指向它，**不依赖真实数据文件**；真实数据由 Hans 下载构建后人工验收）。
+
+| # | 验收标准 | 用例与关键断言 |
+| --- | --- | --- |
+| 1 | 在右侧解析原文选词可主动查询 ECDICT 英汉词条 | 「双击选词 → 查词 → 卡片展示」：真实浏览器双击选中段落中的词 → 工具条浮现 → 点「查词」主动发起 → 服务端命中固定词条，卡片展示词条、音标、中英释义、考试标签芯片（高考/六级/考研/雅思）、柯林斯星级/牛津核心、词形变化与来源许可脚注；服务级覆盖大小写/首尾标点/空白归一、词组（含空格键）、大写词原始词形（NASA）、撇号/连字符词条（`'hood`/`-gate`）均命中 |
+| 2 | 查询结果展示词典提供的释义等可用信息，无词条时明确反馈 | 命中卡片展示释义等全部字段（服务级断言完整字段：phonetic/translation/definition/pos/collins/oxford/tag/bnc/frq/exchange）；「未收录词条」：查询不存在的词 → 卡片明确反馈「词典未收录「document」」；服务级 404 `{error:"entry not found"}`；非法参数（缺 word/仅空白/超长）400 |
+| 3 | 词典数据准备后断网仍可查询，保留所需许可声明 | 「解析服务不可用仍可查词」：关闭 Docling mock 后查词仍命中（查询为服务端纯本地文件操作，不访问网络；构建产物不含网络资源 audio/detail）；许可声明保留在构建产物 manifest（MIT 许可全文 + 数据来源）与结果卡片脚注（ECDICT · MIT License），并由构建脚本用例断言 |
+| 4 | 首版不维护查词历史 | 查词后断言浏览器 localStorage 无任何词典/历史键；服务端无查词存储（无历史文件，仅只读查询） |
+| 5 | 浏览器流程验证选词、离线命中及无词条情况；依赖和数据下载由 Hans 执行，提供命令 | 选词（双击）、命中、未收录、词典未准备（明确提示按 README 准备数据）均为真实浏览器操作；数据准备命令在 README「词典数据准备」与构建脚本用例中固化；「点查词后工具条消失、关闭按钮收起卡片、Escape 隐藏工具条」覆盖工具条显隐 |
+
+补充用例：「构建脚本」（固定 CSV → 键去重/字节序排序/许可声明落盘/索引与词条文件一一对应；缺文件报错）；「词典数据未准备」服务级 503（显式空目录，不依赖真实数据是否已构建）；「离线查询」用独立服务+关闭 mock 证明不依赖解析服务。
+
 ## 真实 Docling 接入验证
 
 非自动化层，验收时以真实服务执行（脚本已入库：仓库根目录运行 `node scripts/verify-real-docling.mjs`，结果记录见 PR 描述）。脚本退出清理自证（Windows）：启动即以 `READEVA_VERIFY_PYTHON`（默认环境内 python.exe，绕过 conda 包装层）直连 docling，成功与异常退出路径均用 `taskkill /PID <pid> /T /F` 杀整棵进程树、等待子进程 exit（8s 超时）并探测 5001/8899 健康端口已不可达，防止 uvicorn 孙进程（~2GB）残留；端口仍可达时打警告（可能是外部遗留进程）：
@@ -107,3 +121,4 @@ npm test
 - `tests/fixtures/sample-a.pdf`（8 页）、`tests/fixtures/sample-b.pdf`（4 页）由 `scripts/make-fixtures.mjs`（pdf-lib）生成：带真实文字层、含标题/段落/表格/矢量图形页，创建日期固定。`npm run fixtures` 可再生成。
 - `tests/fixtures/docling/default-page.json`、`tests/fixtures/docling/page-3.json` 为固定 Docling 结果（DoclingDocument JSON）：标题/小节、段落（含缺位置样例）、无序/有序列表、4×3 表格（列头+数据）、内嵌 PNG 图片资源、furniture 页眉页脚（应被跳过）。
 - `tests/fixtures/docling/linkage-page.json`（双向联动样例页：全部块带位置，含 `BOTTOMLEFT` 坐标系样例）、`tests/fixtures/docling/broken-positions-page.json`（零尺寸无效 bbox 与缺位置样例）供联动用例使用。
+- `tests/fixtures/dict/ecdict-fixture.csv`（固定 ECDICT 样例 CSV，ECDICT 真实格式：13 列、引号包裹含逗号字段、字面 `\n` 分行、含空格/连字符/撇号/大写词条与重复行）由 `scripts/build-dictionary.mjs` 在词典用例中构建为临时词典目录，**不依赖真实数据文件**；真实数据准备见 README「词典数据准备」。
