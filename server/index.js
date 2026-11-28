@@ -38,11 +38,19 @@ const config = {
       process.env.READEVA_DOCLING_TIMEOUT_MS ??
       300_000,
   ),
-  // 页解析并发上限（Issue #5）：与解析服务能力匹配，默认 1（docling_service 单线程串行）。
+  // 页解析并发上限（Issue #5）：与解析服务能力匹配，默认 2（docling_service 线程池
+  // 同步为 2，共享已加载模型），最小 1；本机 2GB pagefile 建议不超过 2。
   parseConcurrency: Number(
     parseArg(process.argv, '--parse-concurrency') ??
       process.env.READEVA_PARSE_CONCURRENCY ??
-      1,
+      2,
+  ),
+  // 背景扫全派发节流（毫秒）：连续背景转换之间的最小启动间隔，缓解持续满核 CPU；
+  // 显式请求/置顶页不受限。默认 0 = 不节流（现行为）。
+  parseSweepDelayMs: Number(
+    parseArg(process.argv, '--parse-sweep-delay-ms') ??
+      process.env.READEVA_PARSE_SWEEP_DELAY_MS ??
+      0,
   ),
 };
 
@@ -68,6 +76,7 @@ const parseTasks = doclingAdapter
       adapter: doclingAdapter,
       library,
       concurrency: config.parseConcurrency,
+      sweepDelayMs: config.parseSweepDelayMs,
     })
   : null;
 const app = express();

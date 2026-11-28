@@ -116,9 +116,15 @@ test('跳页到第 3 页：按页重新解析并展示列表、表格与图片�
   expect(converts.map((r) => r.filename)).toContain('page-3.pdf');
 });
 
-test('回到已解析页与重开文档：直接取回结果，不重新解析', async ({ page, context }) => {
-  // Issue #5 调度会在后台补全整本：先等待全部页解析完成，再验证已完成页复用。
-  await expect.poll(() => mock.convertCalls(), { timeout: 30000 }).toBe(8);
+test('回到已解析页与重开文档：直接取回结果，不重新解析', async ({ page, context, request }) => {
+  // Issue #5 调度会在后台补全整本：先等待全部页解析完成且落盘（并发 2 下
+  // 转换提交数到 8 不代表完成，必须以进度快照 succeeded=8 为准），再验证复用。
+  await expect.poll(async () => {
+    const { documents } = await (await request.get(`${service.base}/api/documents`)).json();
+    const doc = documents.find((d) => d.name === 'sample-a.pdf');
+    const snap = await (await request.get(`${service.base}/api/documents/${doc.id}/parse/progress`)).json();
+    return snap.succeeded;
+  }, { timeout: 30000 }).toBe(8);
   const callsAfterParse = mock.convertCalls();
 
   // 打开文档（恢复到上次阅读的第 3 页，已解析 → 只取回），再回到第 1 页。
@@ -157,12 +163,12 @@ test('重启服务后新会话恢复解析内容，仍然不重新解析', async
 
 test('解析失败状态与原因可见，重试后恢复', async ({ page }) => {
   // Issue #5 调度会补全整本，sample-a 已全部解析；改用未解析的 sample-b 验证失败重试：
-  // 行为脚本第 1 次成功（打开即解析第 1 页），其后失败（第 2 页及队列后续）。
+  // 按页失败注入第 2 页（并发 2 下多页并行提交，按页注入保证确定性）。
   await page.goto(`${service.base}/`);
   await page.setInputFiles('#import-input', FIXTURE_B);
   await expect(page.locator('#library-tbody tr', { hasText: 'sample-b.pdf' })).toHaveCount(1);
 
-  mock.setBehavior([{ mode: 'success' }, { mode: 'failure', message: 'mock conversion exploded' }]);
+  mock.setFailPages({ 2: 'mock conversion exploded' });
 
   await openReader(page, 'sample-b.pdf');
   // 跳到第 2 页：调度已在后台排队，该页解析失败（失败不阻塞其他页）。
@@ -174,8 +180,8 @@ test('解析失败状态与原因可见，重试后恢复', async ({ page }) => 
   await expect(page.locator('#parse-error')).toContainText('mock conversion exploded');
   await expect(page.locator('#parse-retry')).toBeVisible();
 
-  // 恢复成功行为后点击重试 → 完成。
-  mock.setBehavior(null);
+  // 解除按页失败注入后点击重试 → 完成。
+  mock.setFailPages({});
   await page.click('#parse-retry');
   await waitForPanelDone(page);
   await expect(page.locator('#parse-content .parse-paragraph').first()).toContainText(

@@ -73,7 +73,8 @@ JSON 持久化使用「临时文件 + rename」原子写；Windows 上 rename �
 
 - **优先级规则**：`PUT /api/documents/:id/reading-position` 上报阅读位置后，未开始任务按「当前页 → 后续页 → 前置页」升序重排；跳页只重排未开始任务，进行中的页不取消、不重复启动。
 - **队列成员**：仅收未开始（无落盘记录且未运行）的页；已完成页从队列摘除、复用结果；**失败页不入自动队列、不自动重试**——标记失败、不阻塞队列，仅通过显式解析请求（`POST …/parse`）重试，成功后由 `saveResult` 替换失败记录。用户视角：整本补全会停在「已解析 x/y · 失败 n」，失败页保持可见可重试。
-- **派发**：全局并发上限可配置（`--parse-concurrency` / `READEVA_PARSE_CONCURRENCY`，默认 1，对齐 docling_service 单线程串行，跨文档共享）；任务结束（成功或失败）后继续派发队列下一页——队列按序补全其余未解析页（闲置补全）。
+- **派发**：全局并发上限可配置（`--parse-concurrency` / `READEVA_PARSE_CONCURRENCY`，默认 2，与 docling_service 线程池 `max_workers=2` 对齐——同进程共享已加载模型，内存不翻倍、CPU 翻倍；跨文档共享；本机 2GB pagefile 下 2 是稳妥上限）；任务结束（成功或失败）后继续派发队列下一页——队列按序补全其余未解析页（闲置补全）。跳页插队为 staggered 语义：新页插入队首，任一并发槽释放即开始，不做「保留空槽」，平均跳页等待约为串行的一半。
+- **扫全节流（可选）**：`--parse-sweep-delay-ms` / `READEVA_PARSE_SWEEP_DELAY_MS`（默认 0 = 不节流）：连续背景转换之间的最小启动间隔，缓解并发 2 下的持续满核 CPU；显式请求/置顶页不受限（等待期间任务留在队首、不占并发槽）。
 - **显式请求插队**：`POST …/pages/:page/parse` 将目标页置于队首并标记置顶（pinned）：随后的阅读位置重排不会把显式请求/重试的页降级；页离开队列（开始执行或复用跳过）即消耗置顶标记。
 - **进度查询**：`GET /api/documents/:id/parse/progress` 返回逐页状态（含队列位置与失败原因）与计数（succeeded/total + failed/running/queued/idle）；已完成/失败页以落盘记录的轻量状态索引为准，服务重启后进度不丢。
 - **轻量状态索引（B1）**：进度快照、优先级重排与单页状态查询经 `parse-store.getStatus()` 只读状态字段（status/parseId/error/updatedAt），按 mtime+size 命中缓存、写路径主动失效——不逐轮全量读盘解析内容块（实测 215 页 × ~660KB/页 从每轮 ~139MB 读盘 / ~0.3s 同步阻塞降至每轮仅 stat）；内容块仅在 `GET …/parse/result` 时读取。

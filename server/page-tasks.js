@@ -15,17 +15,24 @@ import { DoclingServiceError, extractPage } from './docling.js';
  * - 跳页只重排未开始任务：进行中的页不取消、不重复启动；
  * - 已完成页从队列摘除并复用结果；失败页标记失败、不回队、不阻塞队列；
  * - 队列按序补全其余未解析页（闲置补全）；失败页仅通过显式请求重试；
- * - 全局并发上限可配置（对齐解析服务能力：docling_service 单线程串行）。
+ * - 全局并发上限可配置（默认 2，与 docling_service 线程池对齐）；背景派发可节流。
  */
 export class ParseTaskManager {
-  constructor({ store, adapter, library, concurrency = 1 }) {
+  constructor({ store, adapter, library, concurrency = 2, sweepDelayMs = 0 }) {
     this.store = store;
     this.adapter = adapter;
     this.library = library;
     const parsed = Number(concurrency);
-    // 并发上限与服务能力匹配，默认 1（docling_service 为单线程串行），最小 1。
+    // 并发上限与解析服务能力匹配，默认 2（docling_service 线程池同步为 2），最小 1；
+    // 本机 2GB pagefile 下 2 是稳妥上限。
     this.concurrency =
       Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1;
+    const sweep = Number(sweepDelayMs);
+    // 背景扫全派发节流（毫秒）：连续背景转换之间的最小启动间隔；显式请求/置顶页
+    // 不受限。0 = 不节流。用于并发 2 下缓解持续满核 CPU。
+    this.sweepDelayMs = Number.isFinite(sweep) && sweep > 0 ? Math.floor(sweep) : 0;
+    this.lastSweepDispatchAt = 0;
+    this.sweepTimer = null;
     /** docId -> Set<page>，内存中的进行中任务。 */
     this.running = new Map();
     /** docId -> number[]，未开始任务的优先队列（队首最先解析）。 */
@@ -136,33 +143,65 @@ export class ParseTaskManager {
     return total;
   }
 
-  /** 按并发上限派发队列任务。 */
+  /** 按并发上限派发队列任务；背景任务受扫全节流约束（置顶/显式页不受限）。 */
   pump() {
     for (;;) {
       if (this.runningCount() >= this.concurrency) return;
       const next = this.takeNext();
       if (!next) return;
+      if (
+        !next.pinned &&
+        this.sweepDelayMs > 0 &&
+        Date.now() - this.lastSweepDispatchAt < this.sweepDelayMs
+      ) {
+        // 未到节流间隔：任务留在队首（不占并发槽），挂定时器到点继续派发。
+        if (!this.sweepTimer) {
+          const wait = this.sweepDelayMs - (Date.now() - this.lastSweepDispatchAt);
+          this.sweepTimer = setTimeout(() => {
+            this.sweepTimer = null;
+            this.pump();
+          }, wait);
+        }
+        return;
+      }
+      this.claimNext(next.docId, next.page);
+      this.lastSweepDispatchAt = Date.now();
       this.runInBackground(next.docId, next.page);
     }
   }
 
-  /** 取下一个待解析页（出队）；跳过失效条目，无任务返回 null。 */
+  /**
+   * 取下一个待解析页：跳过失效条目（已成功/已在运行的陈旧队列项），返回队首
+   * 待办页及其置顶状态；**不移出队列、不消耗置顶标记**（由 claimNext 在实际
+   * 派发时完成，节流等待期间任务保留在队首）。无可派发任务返回 null。
+   */
   takeNext() {
     for (const [docId, queue] of this.queues) {
       while (queue.length > 0) {
-        const page = queue.shift();
-        // 离开队列即消耗置顶标记（成功跳过或开始执行）。
-        this.pinned.get(docId)?.delete(page);
-        if (this.isRunning(docId, page)) continue;
-        // 轻量状态（B1）：成功页出队丢弃（结果已持久化，复用即可）。失败页不在
-        // 自动队列中——出现在这里只能是显式重试（start 入队），照常执行。
+        const page = queue[0];
         const status = this.store.getStatus(docId, page);
-        if (status?.status === 'succeeded') continue;
-        return { docId, page };
+        if (this.isRunning(docId, page) || status?.status === 'succeeded') {
+          // 失效条目出队丢弃（成功页复用持久化结果；运行中页不该留在队列）。
+          queue.shift();
+          this.pinned.get(docId)?.delete(page);
+          continue;
+        }
+        return { docId, page, pinned: this.pinned.get(docId)?.has(page) ?? false };
       }
       this.queues.delete(docId);
     }
     return null;
+  }
+
+  /** 实际派发前从队列移除该页并消耗置顶标记。 */
+  claimNext(docId, page) {
+    const queue = this.queues.get(docId);
+    if (queue) {
+      const index = queue.indexOf(page);
+      if (index >= 0) queue.splice(index, 1);
+      if (queue.length === 0) this.queues.delete(docId);
+    }
+    this.pinned.get(docId)?.delete(page);
   }
 
   runInBackground(docId, page) {

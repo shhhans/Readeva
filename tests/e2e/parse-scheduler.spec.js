@@ -261,6 +261,92 @@ test('显式请求置顶不被随后的阅读位置重排降级（pinned）', as
   ]);
 });
 
+test('并发 2：两页同时转换（并行 in-flight），其余排队', async ({ request }) => {
+  await setup({ mockOptions: { convertDelayMs: 250 }, env: { READEVA_PARSE_CONCURRENCY: '2' } });
+  const doc = await importFixtureA(request);
+
+  const put = await putReadingPosition(request, doc.id, 1);
+  const progress = (await put.json()).progress;
+  // 并发 2：第 1、2 页同时进入 running（两个转换并行 in-flight），其余排队。
+  expect(progress.pages[0]).toMatchObject({ page: 1, status: 'running' });
+  expect(progress.pages[1]).toMatchObject({ page: 2, status: 'running' });
+  expect(progress.running).toBe(2);
+  expect(progress.pages.slice(2).every((p) => p.status === 'queued')).toBe(true);
+  expect(progress.pages.slice(2).map((p) => p.page)).toEqual([3, 4, 5, 6, 7, 8]);
+
+  await waitFor(async () => (await getProgress(request, doc.id)).succeeded).toBe(8);
+  // 并行不重复解析：每页恰好一次转换。
+  expect(mock.convertCalls()).toBe(8);
+});
+
+test('并发 2 跳页插队：任一槽释放即开始，排在阅读顺序之前', async ({ request }) => {
+  await setup({ mockOptions: { convertDelayMs: 250 }, env: { READEVA_PARSE_CONCURRENCY: '2' } });
+  const doc = await importFixtureA(request);
+
+  await putReadingPosition(request, doc.id, 1); // p1、p2 占满两槽，[3..8] 排队
+  // 跳到第 6 页：置顶队首，任一槽释放即开始（staggered，不预留空槽）。
+  const put = await putReadingPosition(request, doc.id, 6);
+  const queuedPages = (await put.json()).progress.pages
+    .filter((p) => p.status === 'queued')
+    .sort((a, b) => a.queuePosition - b.queuePosition)
+    .map((p) => p.page);
+  expect(queuedPages).toEqual([6, 7, 8, 3, 4, 5]);
+
+  await waitFor(() => convertSeq().length).toBe(8);
+  const seq = convertSeq();
+  // 前两个转换是占槽的 p1/p2（并发 2 下两个提交的 mock 到达顺序可能交错，只断集合）。
+  expect(seq.slice(0, 2).sort()).toEqual(['page-1.pdf', 'page-2.pdf']);
+  // 插队语义：第 6 页先于被降级的 3/4/5（7/8 与 6 同批并行派发，到达顺序不新 assert）。
+  const i6 = seq.indexOf('page-6.pdf');
+  expect(i6).toBeGreaterThan(1);
+  for (const later of ['page-3.pdf', 'page-4.pdf', 'page-5.pdf']) {
+    expect(seq.indexOf(later), `page-6 应先于 ${later}`).toBeGreaterThan(i6);
+  }
+});
+
+test('并发上限钐制：非法值回落 1，更高配置生效', async ({ request }) => {
+  for (const concurrency of ['0', 'abc']) {
+    await setup({ env: { READEVA_PARSE_CONCURRENCY: concurrency } });
+    const doc = await importFixtureA(request);
+    const progress = (await (await putReadingPosition(request, doc.id, 1)).json()).progress;
+    expect(progress.running).toBe(1);
+    expect(progress.pages[0].status).toBe('running');
+    expect(progress.pages[1].status).toBe('queued');
+    await stopService(service);
+    await mock.close();
+    service = undefined;
+    mock = undefined;
+  }
+
+  // 更高配置生效：并发 3 → 三页同时 running。
+  await setup({ env: { READEVA_PARSE_CONCURRENCY: '3' } });
+  const doc = await importFixtureA(request);
+  const progress = (await (await putReadingPosition(request, doc.id, 1)).json()).progress;
+  expect(progress.running).toBe(3);
+  expect(progress.pages.slice(0, 3).every((p) => p.status === 'running')).toBe(true);
+});
+
+test('扫全节流 READEVA_PARSE_SWEEP_DELAY_MS：背景派发间隔生效，显式请求不受限', async ({ request }) => {
+  // convertDelayMs 拉长转换窗口，确保轮询能观察到 p2 的 running 状态。
+  await setup({ mockOptions: { convertDelayMs: 300 }, env: { READEVA_PARSE_CONCURRENCY: '2', READEVA_PARSE_SWEEP_DELAY_MS: '400' } });
+  const doc = await importFixtureA(request);
+
+  // 首个派发不受节流影响（立即开始）；第二个背景派发被节流，任务留在队首。
+  let progress = (await (await putReadingPosition(request, doc.id, 1)).json()).progress;
+  expect(progress.pages[0]).toMatchObject({ page: 1, status: 'running' });
+  expect(progress.pages[1]).toMatchObject({ page: 2, status: 'queued' });
+  expect(progress.running).toBe(1);
+
+  // 显式请求不受节流限制：立即占用空闲槽。
+  const post = await request.post(`${service.base}/api/documents/${doc.id}/pages/7/parse`);
+  expect(post.status()).toBe(202);
+  progress = await getProgress(request, doc.id);
+  expect(progress.pages.find((p) => p.page === 7).status).toBe('running');
+
+  // 节流计时器到点后，第 2 页恢复派发。
+  await waitFor(async () => (await getProgress(request, doc.id)).pages[1].status).toBe('running');
+});
+
 test('B1 规模回归：进度/重排接口走轻量状态索引，不逐轮全量读盘（210 页 × ~600KB 记录）', async ({ request }) => {
   await setup();
   // 生成 210 页 PDF 并导入。
