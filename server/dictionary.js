@@ -13,13 +13,22 @@ export class DictionaryNotPreparedError extends Error {
 }
 
 /**
- * 归一化查询词：返回小写查询键；无有效查询词（空/超长）时返回 null。
+ * 查询词长度上限（归一化后的字符数）。
+ * 超长查询不再报「非法参数」，而是与「未收录」同一语义（404 未收录）：
+ * 超长文本（整段选文等）必然不在词典里，报错对用户没有意义。
+ */
+export const MAX_LOOKUP_LENGTH = 80;
+
+/**
+ * 归一化查询词：返回小写查询键；无有效查询词（缺参/仅空白）时返回 null。
  *
  * - Unicode NFC 归一；弯引号/破折号折算为常见 ASCII 形态；
  * - 连续空白折叠为单个空格（支持词组词条，如 “cabin pressure”）；
  * - 去掉首尾的标点/符号，但保留词条中实际存在的撇号与连字符
  *   （ECDICT 收录 ‘hood、-gate 这类以撇号/连字符开头的词条）；
  * - 查询键统一小写（构建时同样按小写键索引，大小写不敏感）。
+ *
+ * 长度判定在调用方完成（见 MAX_LOOKUP_LENGTH）：归一化本身不再丢弃超长词。
  */
 export function normalizeLookupKey(raw) {
   if (typeof raw !== 'string') return null;
@@ -39,8 +48,50 @@ export function normalizeLookupKey(raw) {
     s = s.slice(0, -1);
   }
   s = s.trim();
-  if (s.length === 0 || s.length > 80) return null;
+  if (s.length === 0) return null;
   return s.toLowerCase();
+}
+
+/**
+ * ECDICT 归因信息（内嵌常量）：许可 + 上游数据来源。
+ * 与 `scripts/build-dictionary.mjs` 落盘到 manifest 的声明一致；
+ * manifest 缺少相应字段时回落到这里（结果卡片页脚展示真实归因）。
+ */
+export const DEFAULT_DICTIONARY_ATTRIBUTION = {
+  license: {
+    name: 'MIT',
+    url: 'https://github.com/skywind3000/ECDICT/blob/master/LICENSE',
+    copyright: 'Copyright (c) 2025 Linwei (skywind3000)',
+  },
+  dataSources:
+    '词条数据整理自公开资料：EDictAZ.txt、四六级至 GRE 词汇表（音标由作者补充）、' +
+    'cdict-1.0-1 开源字典数据，并按英国国家语料库（BNC）校对与社区贡献增补；' +
+    '来源与许可说明见 https://github.com/skywind3000/ECDICT。',
+};
+
+/**
+ * 从构建产物 manifest 解析归因信息（许可 + 上游数据来源）。
+ *
+ * - manifest 带许可/来源字段 → 采用构建时的真实声明；
+ * - manifest 缺字段 → 逐字段回落到内嵌常量（DEFAULT_DICTIONARY_ATTRIBUTION）；
+ * - manifest 完全没有归因信息 → 返回 null（调用方据此降级为静态文案）。
+ */
+export function resolveAttribution(manifest) {
+  const raw = manifest?.license && typeof manifest.license === 'object' ? manifest.license : null;
+  const name = typeof raw?.name === 'string' && raw.name.trim() ? raw.name.trim() : null;
+  const dataSources =
+    (typeof raw?.dataSources === 'string' && raw.dataSources.trim() && raw.dataSources.trim()) ||
+    (typeof manifest?.dataSources === 'string' && manifest.dataSources.trim() && manifest.dataSources.trim()) ||
+    null;
+  if (!name && !dataSources) return null;
+  return {
+    license: {
+      name: name ?? DEFAULT_DICTIONARY_ATTRIBUTION.license.name,
+      url: raw?.url ?? DEFAULT_DICTIONARY_ATTRIBUTION.license.url,
+      copyright: raw?.copyright ?? DEFAULT_DICTIONARY_ATTRIBUTION.license.copyright,
+    },
+    dataSources: dataSources ?? DEFAULT_DICTIONARY_ATTRIBUTION.dataSources,
+  };
 }
 
 /**
@@ -68,6 +119,7 @@ export class DictionaryStore {
     this._starts = null;
     this._fd = null;
     this.manifest = null;
+    this.attribution = null;
   }
 
   /** 惰性加载；失败时抛 DictionaryNotPreparedError（或损坏时的普通 Error）。 */
@@ -117,6 +169,8 @@ export class DictionaryStore {
       throw new DictionaryNotPreparedError('dictionary entries missing');
     }
     this.manifest = manifest;
+    // 归因（许可 + 上游数据来源）：来自构建产物 manifest，缺字段时用内嵌常量。
+    this.attribution = resolveAttribution(manifest);
     this._loaded = true;
     const count = manifest.entryCount ?? this._starts.length;
     console.log(`Readeva dictionary: ${count} entries from ${this.dir}`);
@@ -152,6 +206,14 @@ export class DictionaryStore {
       else lo = mid + 1;
     }
     return null;
+  }
+
+  /**
+   * 归因信息（许可 + 上游数据来源），供接口回传给前端展示真实 attribution。
+   * 词典未准备（manifest 不可读）或 manifest 无归因信息时返回 null。
+   */
+  getAttribution() {
+    return this.attribution;
   }
 
   /** 释放文件句柄（测试与优雅关闭用；不影响持久化数据）。 */

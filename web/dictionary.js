@@ -33,6 +33,11 @@ const EXCHANGE_LABELS = {
 /** 词性占比（pos 形如 n:8/v:2）→ 「名 8% · 动 2%」。 */
 const POS_LABELS = { n: '名', v: '动', a: '形', adv: '副', prep: '介', conj: '连', pron: '代', num: '数', int: '感叹' };
 
+/**
+ * 无归因信息时的静态页脚文案（词典未准备/查询失败时降级到它）。
+ */
+const STATIC_ATTRIBUTION_TEXT = '释义来自本地 ECDICT 词典（MIT License）· 离线查询';
+
 function formatPos(raw) {
   if (!raw || !/^[a-z0-9]+:/i.test(raw)) return null;
   const parts = raw
@@ -84,7 +89,7 @@ export class WordLookup {
     this.toolbar = toolbar;
     this.lookupButton = lookupButton;
     this.card = card;
-    this.el = elements; // { word, phonetic, close, status, translation, translationText, definition, definitionText, meta }
+    this.el = elements; // { word, phonetic, close, status, translation, translationText, definition, definitionText, meta, attribution }
     this.selectedText = '';
     this.lookupToken = 0;
     this.onPointerUp = this.onPointerUp.bind(this);
@@ -184,9 +189,9 @@ export class WordLookup {
     this.showCard();
     this.setStatus(`查询中…`);
     try {
-      const { entry } = await fetchDictionaryLookup(word);
+      const { entry, license, dataSources } = await fetchDictionaryLookup(word);
       if (token !== this.lookupToken) return; // 已有新查询/已关闭：丢弃过期响应
-      this.renderEntry(entry);
+      this.renderEntry(entry, { license, dataSources });
     } catch (err) {
       if (token !== this.lookupToken) return;
       this.renderError(word, err);
@@ -206,6 +211,8 @@ export class WordLookup {
     this.el.phonetic.textContent = '';
     this.el.phonetic.hidden = true;
     this.el.status.textContent = '';
+    // 查询中：先回到静态归因文案，命中后由 renderAttribution 换成真实归因。
+    this.renderAttribution(null);
     this.card.hidden = false;
   }
 
@@ -214,8 +221,9 @@ export class WordLookup {
     this.el.status.hidden = false;
   }
 
-  renderEntry(entry) {
+  renderEntry(entry, attribution) {
     this.el.status.hidden = true;
+    this.renderAttribution(attribution);
     this.el.word.textContent = entry.word ?? '';
     if (entry.phonetic) {
       this.el.phonetic.textContent = entry.phonetic;
@@ -277,18 +285,58 @@ export class WordLookup {
     this.el.meta.hidden = this.el.meta.childElementCount === 0;
   }
 
+  /**
+   * 结果卡片页脚归因：展示真实许可与上游数据来源（来自构建产物 manifest.json，
+   * 服务端随查询响应一起回传）。无归因信息时降级为静态文案。
+   */
+  renderAttribution(attribution) {
+    const footer = this.el.attribution;
+    if (!footer) return;
+    const license = attribution?.license ?? null;
+    const dataSources = attribution?.dataSources ?? null;
+    if (!license && !dataSources) {
+      footer.textContent = STATIC_ATTRIBUTION_TEXT;
+      footer.removeAttribute('data-attribution');
+      return;
+    }
+    footer.replaceChildren();
+    const main = document.createElement('span');
+    main.className = 'dict-attribution-main';
+    const licenseName = license?.name ? `${license.name} License` : null;
+    main.textContent = `释义来自 ECDICT 离线词典${licenseName ? `（${licenseName}）` : ''}· 离线查询`;
+    const details = [license?.copyright, license?.url].filter(Boolean).join(' · ');
+    if (details) main.title = details;
+    footer.append(main);
+    if (dataSources) {
+      const sources = document.createElement('span');
+      sources.className = 'dict-attribution-sources';
+      sources.textContent = `数据来源：${dataSources}`;
+      sources.title = dataSources;
+      footer.append(sources);
+    }
+    footer.setAttribute('data-attribution', 'manifest');
+  }
+
   renderError(word, err) {
-    this.el.word.textContent = word;
+    this.el.word.textContent = truncateForDisplay(word);
     this.el.phonetic.hidden = true;
     this.el.translation.hidden = true;
     this.el.definition.hidden = true;
     this.el.meta.hidden = true;
+    // 查询失败/未收录：没有归因信息，页脚降级为静态文案。
+    this.renderAttribution(null);
     if (err?.status === 404) {
-      this.setStatus(`词典未收录「${word}」`);
+      this.setStatus(`词典未收录「${truncateForDisplay(word)}」`);
     } else if (err?.status === 503) {
       this.setStatus('离线词典数据未准备：请先按 README「词典数据准备」下载 ECDICT 数据并运行构建命令，然后重启服务。');
     } else {
       this.setStatus(`查询失败：${err?.message ?? '未知错误'}`);
     }
   }
+}
+
+/** 超长选文在卡片里只显示前 40 字符（完整内容仍在服务端按未收录处理）。 */
+function truncateForDisplay(word) {
+  const text = String(word ?? '');
+  return text.length > 40 ? `${text.slice(0, 40)}…` : text;
 }
